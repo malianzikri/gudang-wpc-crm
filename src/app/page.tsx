@@ -33,6 +33,49 @@ type Lead = {
   capi_last_error: string | null;
 };
 
+type PerformanceMetrics = {
+  spend: number;
+  impressions: number;
+  reach: number;
+  clicks: number;
+  leads: number;
+  qualified: number;
+  quotation: number;
+  hot: number;
+  closing: number;
+  revenue: number;
+  ctr: number;
+  cpc: number;
+  cpm: number;
+  cpl: number;
+  cost_per_qualified: number;
+  cost_per_closing: number;
+  qualified_rate: number;
+  closing_rate: number;
+  roas: number;
+};
+
+type PerformanceResponse = {
+  ok: boolean;
+  since: string;
+  until: string;
+  summary: PerformanceMetrics;
+  campaigns: Array<{
+    id: string;
+    campaign_name: string;
+    metrics: PerformanceMetrics;
+  }>;
+  ads: Array<{
+    id: string;
+    ad_name: string;
+    adset_name: string;
+    campaign_name: string;
+    metrics: PerformanceMetrics;
+  }>;
+  warning?: string;
+  error?: string;
+};
+
 function rupiah(value: number) {
   return new Intl.NumberFormat("id-ID", {
     style: "currency",
@@ -41,12 +84,34 @@ function rupiah(value: number) {
   }).format(value || 0);
 }
 
+function compactNumber(value: number) {
+  return new Intl.NumberFormat("id-ID", {
+    notation: value >= 10000 ? "compact" : "standard",
+    maximumFractionDigits: 1
+  }).format(value || 0);
+}
+
+function pct(value: number) {
+  return `${Number(value || 0).toFixed(1)}%`;
+}
+
+function roas(value: number) {
+  return `${Number(value || 0).toFixed(2)}x`;
+}
+
 function dateTime(value: string) {
   return new Intl.DateTimeFormat("id-ID", {
     dateStyle: "short",
     timeStyle: "short",
     timeZone: "Asia/Jakarta"
   }).format(new Date(value));
+}
+
+function dateInputLocal(date: Date) {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, "0");
+  const d = String(date.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
 }
 
 function capiLabel(lead: Lead) {
@@ -59,6 +124,13 @@ function capiLabel(lead: Lead) {
 }
 
 export default function Dashboard() {
+  const today = useMemo(() => new Date(), []);
+  const sevenDaysAgo = useMemo(() => {
+    const d = new Date();
+    d.setDate(d.getDate() - 6);
+    return d;
+  }, []);
+
   const [leads, setLeads] = useState<Lead[]>([]);
   const [drafts, setDrafts] = useState<
     Record<string, { status: string; revenue: string }>
@@ -71,6 +143,14 @@ export default function Dashboard() {
   const [q, setQ] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
   const [sourceFilter, setSourceFilter] = useState("");
+
+  const [since, setSince] = useState(dateInputLocal(sevenDaysAgo));
+  const [until, setUntil] = useState(dateInputLocal(today));
+  const [performance, setPerformance] = useState<PerformanceResponse | null>(null);
+  const [performanceLoading, setPerformanceLoading] = useState(false);
+  const [performanceGroup, setPerformanceGroup] = useState<"campaign" | "ad">(
+    "campaign"
+  );
 
   async function load() {
     setLoading(true);
@@ -114,6 +194,36 @@ export default function Dashboard() {
       setLoading(false);
     }
   }
+
+  async function loadPerformance() {
+    setPerformanceLoading(true);
+
+    try {
+      const params = new URLSearchParams({ since, until });
+
+      const res = await fetch(`/api/meta/performance?${params.toString()}`, {
+        cache: "no-store"
+      });
+
+      const json = await res.json();
+
+      if (!res.ok || !json.ok) {
+        throw new Error(json.error || "Gagal mengambil performa iklan.");
+      }
+
+      setPerformance(json);
+    } catch (e: any) {
+      setError(e.message || "Gagal mengambil performa iklan.");
+    } finally {
+      setPerformanceLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    load();
+    loadPerformance();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     load();
@@ -169,6 +279,7 @@ export default function Dashboard() {
       }
 
       await load();
+      await loadPerformance();
     } catch (e: any) {
       setError(e.message || "Gagal menyimpan.");
     } finally {
@@ -192,11 +303,40 @@ export default function Dashboard() {
       }
 
       await load();
+      await loadPerformance();
     } catch (e: any) {
       setError(e.message || "Backfill gagal.");
     } finally {
       setBackfilling(false);
     }
+  }
+
+  function setRange(days: number) {
+    const end = new Date();
+    const start = new Date();
+    start.setDate(end.getDate() - (days - 1));
+    setSince(dateInputLocal(start));
+    setUntil(dateInputLocal(end));
+
+    setTimeout(() => {
+      const params = new URLSearchParams({
+        since: dateInputLocal(start),
+        until: dateInputLocal(end)
+      });
+
+      setPerformanceLoading(true);
+
+      fetch(`/api/meta/performance?${params.toString()}`, {
+        cache: "no-store"
+      })
+        .then((r) => r.json().then((j) => ({ r, j })))
+        .then(({ r, j }) => {
+          if (!r.ok || !j.ok) throw new Error(j.error || "Gagal mengambil data.");
+          setPerformance(j);
+        })
+        .catch((e) => setError(e.message))
+        .finally(() => setPerformanceLoading(false));
+    }, 0);
   }
 
   const summary = useMemo(() => {
@@ -227,6 +367,11 @@ export default function Dashboard() {
     );
   }, [leads]);
 
+  const performanceRows =
+    performanceGroup === "campaign"
+      ? performance?.campaigns ?? []
+      : performance?.ads ?? [];
+
   return (
     <main className="shell">
       <div className="header">
@@ -244,7 +389,10 @@ export default function Dashboard() {
             {backfilling ? "Sync Meta…" : "Sync Nama Iklan"}
           </button>
 
-          <button className="refresh" onClick={load}>
+          <button className="refresh" onClick={() => {
+            load();
+            loadPerformance();
+          }}>
             Refresh
           </button>
         </div>
@@ -286,6 +434,237 @@ export default function Dashboard() {
         <div className="card">
           <div className="label">Revenue Closing</div>
           <div className="value">{rupiah(summary.revenue)}</div>
+        </div>
+      </section>
+
+      <section
+        className="card"
+        style={{ marginBottom: 18, padding: 18 }}
+      >
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "flex-start",
+            gap: 16,
+            flexWrap: "wrap",
+            marginBottom: 16
+          }}
+        >
+          <div>
+            <h2 style={{ margin: 0, fontSize: 21 }}>Performa Iklan</h2>
+            <div className="sub" style={{ fontSize: 13 }}>
+              Spend Meta digabung dengan funnel dan revenue CRM.
+            </div>
+          </div>
+
+          <div
+            style={{
+              display: "flex",
+              gap: 8,
+              flexWrap: "wrap",
+              alignItems: "center"
+            }}
+          >
+            <button className="refresh" onClick={() => setRange(1)}>
+              Hari ini
+            </button>
+            <button className="refresh" onClick={() => setRange(7)}>
+              7 hari
+            </button>
+            <button className="refresh" onClick={() => setRange(30)}>
+              30 hari
+            </button>
+
+            <input
+              className="control"
+              type="date"
+              value={since}
+              onChange={(e) => setSince(e.target.value)}
+              style={{ width: 145 }}
+            />
+            <span style={{ color: "#667085" }}>–</span>
+            <input
+              className="control"
+              type="date"
+              value={until}
+              onChange={(e) => setUntil(e.target.value)}
+              style={{ width: 145 }}
+            />
+            <button
+              className="save"
+              onClick={loadPerformance}
+              disabled={performanceLoading}
+            >
+              {performanceLoading ? "Memuat…" : "Terapkan"}
+            </button>
+          </div>
+        </div>
+
+        {performance?.warning && (
+          <div className="error" style={{ marginBottom: 12 }}>
+            {performance.warning}
+          </div>
+        )}
+
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(6, minmax(130px, 1fr))",
+            gap: 10,
+            marginBottom: 16,
+            overflowX: "auto"
+          }}
+        >
+          {[
+            ["Spend", rupiah(performance?.summary?.spend ?? 0)],
+            ["Lead", compactNumber(performance?.summary?.leads ?? 0)],
+            ["Qualified", compactNumber(performance?.summary?.qualified ?? 0)],
+            ["Closing", compactNumber(performance?.summary?.closing ?? 0)],
+            ["Revenue", rupiah(performance?.summary?.revenue ?? 0)],
+            ["ROAS", roas(performance?.summary?.roas ?? 0)]
+          ].map(([label, value]) => (
+            <div
+              key={label}
+              style={{
+                border: "1px solid var(--border)",
+                borderRadius: 12,
+                padding: 12,
+                minWidth: 130
+              }}
+            >
+              <div className="label">{label}</div>
+              <div style={{ fontWeight: 800, fontSize: 20 }}>{value}</div>
+            </div>
+          ))}
+        </div>
+
+        <div
+          style={{
+            display: "flex",
+            gap: 8,
+            marginBottom: 10
+          }}
+        >
+          <button
+            className="refresh"
+            onClick={() => setPerformanceGroup("campaign")}
+            style={{
+              fontWeight: performanceGroup === "campaign" ? 800 : 500
+            }}
+          >
+            Per Campaign
+          </button>
+          <button
+            className="refresh"
+            onClick={() => setPerformanceGroup("ad")}
+            style={{
+              fontWeight: performanceGroup === "ad" ? 800 : 500
+            }}
+          >
+            Per Ad
+          </button>
+        </div>
+
+        <div className="table-wrap">
+          <table style={{ minWidth: 1400 }}>
+            <thead>
+              <tr>
+                <th>{performanceGroup === "campaign" ? "Campaign" : "Ad"}</th>
+                {performanceGroup === "ad" && <th>Campaign / Ad Set</th>}
+                <th>Spend</th>
+                <th>Lead</th>
+                <th>Qualified</th>
+                <th>Quotation</th>
+                <th>Hot</th>
+                <th>Closing</th>
+                <th>Revenue</th>
+                <th>CPL</th>
+                <th>Cost/Qualified</th>
+                <th>Cost/Closing</th>
+                <th>Closing Rate</th>
+                <th>ROAS</th>
+              </tr>
+            </thead>
+            <tbody>
+              {!performanceLoading &&
+                performanceRows.map((row: any) => (
+                  <tr key={row.id}>
+                    <td>
+                      <div className="name">
+                        {performanceGroup === "campaign"
+                          ? row.campaign_name
+                          : row.ad_name}
+                      </div>
+                      {performanceGroup === "ad" && (
+                        <div className="sub">Ad ID: {row.id}</div>
+                      )}
+                    </td>
+
+                    {performanceGroup === "ad" && (
+                      <td>
+                        <div>{row.campaign_name}</div>
+                        <div className="sub">{row.adset_name}</div>
+                      </td>
+                    )}
+
+                    <td>{rupiah(row.metrics.spend)}</td>
+                    <td>{row.metrics.leads}</td>
+                    <td>
+                      {row.metrics.qualified}
+                      <div className="sub">{pct(row.metrics.qualified_rate)}</div>
+                    </td>
+                    <td>{row.metrics.quotation}</td>
+                    <td>{row.metrics.hot}</td>
+                    <td>{row.metrics.closing}</td>
+                    <td>{rupiah(row.metrics.revenue)}</td>
+                    <td>{rupiah(row.metrics.cpl)}</td>
+                    <td>{rupiah(row.metrics.cost_per_qualified)}</td>
+                    <td>
+                      {row.metrics.closing > 0
+                        ? rupiah(row.metrics.cost_per_closing)
+                        : "—"}
+                    </td>
+                    <td>{pct(row.metrics.closing_rate)}</td>
+                    <td
+                      style={{
+                        fontWeight: 800,
+                        color:
+                          row.metrics.roas > 1
+                            ? "#067647"
+                            : row.metrics.spend > 0
+                              ? "#b42318"
+                              : undefined
+                      }}
+                    >
+                      {roas(row.metrics.roas)}
+                    </td>
+                  </tr>
+                ))}
+
+              {!performanceLoading && performanceRows.length === 0 && (
+                <tr>
+                  <td
+                    colSpan={performanceGroup === "campaign" ? 13 : 14}
+                    style={{ textAlign: "center", color: "#667085", padding: 30 }}
+                  >
+                    Belum ada data performa pada periode ini.
+                  </td>
+                </tr>
+              )}
+
+              {performanceLoading && (
+                <tr>
+                  <td
+                    colSpan={performanceGroup === "campaign" ? 13 : 14}
+                    style={{ textAlign: "center", color: "#667085", padding: 30 }}
+                  >
+                    Memuat performa Meta Ads…
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
         </div>
       </section>
 
