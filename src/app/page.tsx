@@ -74,6 +74,12 @@ type PerformanceResponse = {
   }>;
   warning?: string;
   error?: string;
+  last_synced_at?: string | null;
+  can_sync_at?: string | null;
+  cooldown_remaining_seconds?: number;
+  stale?: boolean;
+  sync_skipped?: boolean;
+  sync_error?: string | null;
 };
 
 function rupiah(value: number) {
@@ -148,6 +154,8 @@ export default function Dashboard() {
   const [until, setUntil] = useState(dateInputLocal(today));
   const [performance, setPerformance] = useState<PerformanceResponse | null>(null);
   const [performanceLoading, setPerformanceLoading] = useState(false);
+  const [performanceSyncing, setPerformanceSyncing] = useState(false);
+  const [nowMs, setNowMs] = useState(Date.now());
   const [performanceGroup, setPerformanceGroup] = useState<"campaign" | "ad">(
     "campaign"
   );
@@ -195,12 +203,19 @@ export default function Dashboard() {
     }
   }
 
-  async function loadPerformance() {
+  async function loadPerformanceCache(
+    rangeSince = since,
+    rangeUntil = until
+  ) {
     setPerformanceLoading(true);
 
     try {
-      const params = new URLSearchParams({ since, until });
+      const params = new URLSearchParams({
+        since: rangeSince,
+        until: rangeUntil
+      });
 
+      // GET only reads Supabase cache + CRM data. It NEVER calls Meta.
       const res = await fetch(`/api/meta/performance?${params.toString()}`, {
         cache: "no-store"
       });
@@ -208,20 +223,60 @@ export default function Dashboard() {
       const json = await res.json();
 
       if (!res.ok || !json.ok) {
-        throw new Error(json.error || "Gagal mengambil performa iklan.");
+        throw new Error(json.error || "Gagal membaca cache performa.");
       }
 
       setPerformance(json);
     } catch (e: any) {
-      setError(e.message || "Gagal mengambil performa iklan.");
+      setError(e.message || "Gagal membaca cache performa.");
     } finally {
       setPerformanceLoading(false);
     }
   }
 
+  async function syncPerformance() {
+    setPerformanceSyncing(true);
+    setNotice("");
+
+    try {
+      const params = new URLSearchParams({ since, until });
+
+      // POST is the ONLY performance action that calls Meta.
+      // The server also enforces a 15 minute cooldown.
+      const res = await fetch(`/api/meta/performance?${params.toString()}`, {
+        method: "POST",
+        cache: "no-store"
+      });
+
+      const json = await res.json();
+
+      if (!res.ok || !json.ok) {
+        throw new Error(json.error || "Sync performa gagal.");
+      }
+
+      setPerformance(json);
+      setNowMs(Date.now());
+
+      if (json.sync_skipped) {
+        setNotice("Sync Meta dilewati karena cooldown 15 menit masih aktif. Data cache tetap digunakan.");
+      } else if (json.stale) {
+        setNotice("Meta sedang membatasi request. Data performa terakhir tetap digunakan.");
+      } else {
+        setNotice("Performa Meta berhasil disinkronkan dan disimpan ke cache.");
+      }
+    } catch (e: any) {
+      setError(e.message || "Sync performa gagal.");
+    } finally {
+      setPerformanceSyncing(false);
+    }
+  }
+
   useEffect(() => {
     load();
-    loadPerformance();
+    loadPerformanceCache();
+
+    const clock = window.setInterval(() => setNowMs(Date.now()), 30000);
+    return () => window.clearInterval(clock);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -279,7 +334,7 @@ export default function Dashboard() {
       }
 
       await load();
-      await loadPerformance();
+      await loadPerformanceCache();
     } catch (e: any) {
       setError(e.message || "Gagal menyimpan.");
     } finally {
@@ -303,7 +358,7 @@ export default function Dashboard() {
       }
 
       await load();
-      await loadPerformance();
+      await loadPerformanceCache();
     } catch (e: any) {
       setError(e.message || "Backfill gagal.");
     } finally {
@@ -315,29 +370,29 @@ export default function Dashboard() {
     const end = new Date();
     const start = new Date();
     start.setDate(end.getDate() - (days - 1));
-    setSince(dateInputLocal(start));
-    setUntil(dateInputLocal(end));
 
-    setTimeout(() => {
-      const params = new URLSearchParams({
-        since: dateInputLocal(start),
-        until: dateInputLocal(end)
-      });
+    const nextSince = dateInputLocal(start);
+    const nextUntil = dateInputLocal(end);
 
-      setPerformanceLoading(true);
+    setSince(nextSince);
+    setUntil(nextUntil);
 
-      fetch(`/api/meta/performance?${params.toString()}`, {
-        cache: "no-store"
-      })
-        .then((r) => r.json().then((j) => ({ r, j })))
-        .then(({ r, j }) => {
-          if (!r.ok || !j.ok) throw new Error(j.error || "Gagal mengambil data.");
-          setPerformance(j);
-        })
-        .catch((e) => setError(e.message))
-        .finally(() => setPerformanceLoading(false));
-    }, 0);
+    // Date presets only read cache. They do NOT call Meta.
+    loadPerformanceCache(nextSince, nextUntil);
   }
+
+  const canSyncPerformance =
+    !performance?.can_sync_at ||
+    nowMs >= new Date(performance.can_sync_at).getTime();
+
+  const cooldownMinutes = performance?.can_sync_at
+    ? Math.max(
+        0,
+        Math.ceil(
+          (new Date(performance.can_sync_at).getTime() - nowMs) / 60000
+        )
+      )
+    : 0;
 
   const summary = useMemo(() => {
     const highIntent = leads.filter((l) =>
@@ -389,10 +444,13 @@ export default function Dashboard() {
             {backfilling ? "Sync Meta…" : "Sync Nama Iklan"}
           </button>
 
-          <button className="refresh" onClick={() => {
-            load();
-            loadPerformance();
-          }}>
+          <button
+            className="refresh"
+            onClick={() => {
+              load();
+              loadPerformanceCache();
+            }}
+          >
             Refresh
           </button>
         </div>
@@ -454,7 +512,7 @@ export default function Dashboard() {
           <div>
             <h2 style={{ margin: 0, fontSize: 21 }}>Performa Iklan</h2>
             <div className="sub" style={{ fontSize: 13 }}>
-              Spend Meta digabung dengan funnel dan revenue CRM.
+              Spend Meta dari cache terakhir + funnel dan revenue CRM. Refresh biasa tidak memanggil Meta.
             </div>
           </div>
 
@@ -492,17 +550,73 @@ export default function Dashboard() {
               style={{ width: 145 }}
             />
             <button
-              className="save"
-              onClick={loadPerformance}
+              className="refresh"
+              onClick={() => loadPerformanceCache()}
               disabled={performanceLoading}
+              title="Membaca cache saja, tanpa request ke Meta"
             >
-              {performanceLoading ? "Memuat…" : "Terapkan"}
+              {performanceLoading ? "Memuat…" : "Terapkan Cache"}
+            </button>
+
+            <button
+              className="save"
+              onClick={syncPerformance}
+              disabled={performanceSyncing || !canSyncPerformance}
+              title={
+                canSyncPerformance
+                  ? "Ambil data terbaru dari Meta Ads"
+                  : "Cooldown server 15 menit untuk mencegah request berlebihan"
+              }
+            >
+              {performanceSyncing
+                ? "Sync Meta…"
+                : canSyncPerformance
+                  ? "Sync Performa Meta"
+                  : `Sync lagi ${cooldownMinutes} m`}
             </button>
           </div>
         </div>
 
+        <div
+          className="sub"
+          style={{
+            marginBottom: 10,
+            display: "flex",
+            gap: 12,
+            flexWrap: "wrap",
+            alignItems: "center"
+          }}
+        >
+          <span>
+            {performance?.last_synced_at
+              ? `Sync Meta terakhir: ${dateTime(performance.last_synced_at)}`
+              : "Belum pernah sync Meta untuk periode ini."}
+          </span>
+          <span>•</span>
+          <span>
+            Meta hanya dipanggil saat tombol “Sync Performa Meta” ditekan.
+          </span>
+          {performance?.stale && (
+            <>
+              <span>•</span>
+              <strong style={{ color: "#b54708" }}>
+                Menampilkan cache terakhir
+              </strong>
+            </>
+          )}
+        </div>
+
         {performance?.warning && (
-          <div className="error" style={{ marginBottom: 12 }}>
+          <div
+            style={{
+              background: "#fffaeb",
+              border: "1px solid #fedf89",
+              color: "#93370d",
+              padding: "10px 12px",
+              borderRadius: 10,
+              marginBottom: 12
+            }}
+          >
             {performance.warning}
           </div>
         )}
