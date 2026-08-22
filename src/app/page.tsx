@@ -150,6 +150,9 @@ export default function Dashboard() {
   const [q, setQ] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
   const [sourceFilter, setSourceFilter] = useState("");
+  const [audienceType, setAudienceType] = useState<
+    "all" | "high_intent" | "closing"
+  >("all");
 
   const [since, setSince] = useState(dateInputLocal(sevenDaysAgo));
   const [until, setUntil] = useState(dateInputLocal(today));
@@ -388,6 +391,19 @@ export default function Dashboard() {
     // They do NOT call Meta.
     load(nextSince, nextUntil);
     loadPerformanceCache(nextSince, nextUntil);
+  }
+
+
+  function exportCustomAudience() {
+    const params = new URLSearchParams({
+      since,
+      until,
+      type: audienceType
+    });
+
+    // Export uses current dashboard date range.
+    // This endpoint only reads Supabase and does not call Meta.
+    window.location.href = `/api/leads/export?${params.toString()}`;
   }
 
   const canSyncPerformance =
@@ -849,6 +865,46 @@ export default function Dashboard() {
           <option value="Meta Ads">Meta Ads</option>
           <option value="WhatsApp Organic">WhatsApp Organic</option>
         </select>
+      </section>
+
+      <section
+        className="card"
+        style={{
+          marginBottom: 14,
+          padding: 14,
+          display: "flex",
+          gap: 10,
+          alignItems: "center",
+          flexWrap: "wrap"
+        }}
+      >
+        <div style={{ minWidth: 240, flex: "1 1 280px" }}>
+          <div className="label">Export Custom Audience Meta</div>
+          <div className="sub">
+            Mengikuti periode {since} s.d. {until}. Tidak memanggil API Meta.
+          </div>
+        </div>
+
+        <select
+          className="control"
+          value={audienceType}
+          onChange={(e) =>
+            setAudienceType(
+              e.target.value as "all" | "high_intent" | "closing"
+            )
+          }
+          style={{ minWidth: 220 }}
+        >
+          <option value="all">All Leads</option>
+          <option value="high_intent">
+            High Intent (Qualified / Quotation / Hot)
+          </option>
+          <option value="closing">Closing</option>
+        </select>
+
+        <button className="save" onClick={exportCustomAudience}>
+          Export CSV Meta
+        </button>
       </section>
 
       <section className="panel">
