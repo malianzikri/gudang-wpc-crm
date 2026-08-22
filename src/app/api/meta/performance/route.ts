@@ -70,12 +70,12 @@ function cacheKey(since: string, until: string) {
   return `${since}:${until}`;
 }
 
-function startOfDayUtc(date: string) {
-  return `${date}T00:00:00.000Z`;
+function startOfDayJakarta(date: string) {
+  return `${date}T00:00:00.000+07:00`;
 }
 
-function endOfDayUtc(date: string) {
-  return `${date}T23:59:59.999Z`;
+function endOfDayJakarta(date: string) {
+  return `${date}T23:59:59.999+07:00`;
 }
 
 function emptyMetrics(): Metrics {
@@ -189,8 +189,8 @@ async function buildPerformanceResponse(
       "id,source_id,campaign_id,campaign_name,adset_id,adset_name,ad_name,status,revenue,first_seen_at"
     )
     .eq("source", "Meta Ads")
-    .gte("first_seen_at", startOfDayUtc(since))
-    .lte("first_seen_at", endOfDayUtc(until))
+    .gte("first_seen_at", startOfDayJakarta(since))
+    .lte("first_seen_at", endOfDayJakarta(until))
     .limit(5000);
 
   if (leadsError) throw leadsError;

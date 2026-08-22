@@ -3,6 +3,10 @@ import { supabaseAdmin } from "@/lib/supabase-admin";
 
 export const runtime = "nodejs";
 
+function validDate(value: string | null) {
+  return value && /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : null;
+}
+
 export async function GET(request: Request) {
   try {
     const db = supabaseAdmin();
@@ -11,15 +15,28 @@ export async function GET(request: Request) {
     const status = url.searchParams.get("status");
     const source = url.searchParams.get("source");
     const q = url.searchParams.get("q")?.trim();
+    const since = validDate(url.searchParams.get("since"));
+    const until = validDate(url.searchParams.get("until"));
 
     let query = db
       .from("leads")
       .select("*")
-      .order("last_seen_at", { ascending: false })
+      // Acquisition list: newest lead first, not most recently chatted lead.
+      .order("first_seen_at", { ascending: false })
       .limit(500);
 
     if (status) query = query.eq("status", status);
     if (source) query = query.eq("source", source);
+
+    // Dashboard dates are interpreted in WIB / Asia-Jakarta.
+    // Postgres timestamptz will normalize these offsets correctly.
+    if (since) {
+      query = query.gte("first_seen_at", `${since}T00:00:00.000+07:00`);
+    }
+
+    if (until) {
+      query = query.lte("first_seen_at", `${until}T23:59:59.999+07:00`);
+    }
 
     if (q) {
       const escaped = q.replace(/[%_,()]/g, "");
@@ -44,6 +61,8 @@ export async function GET(request: Request) {
 
     return NextResponse.json({
       ok: true,
+      since,
+      until,
       leads: data ?? []
     });
   } catch (error: any) {

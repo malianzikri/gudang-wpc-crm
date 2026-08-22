@@ -25,6 +25,7 @@ type Lead = {
   adset_name: string | null;
   campaign_name: string | null;
   last_message: string | null;
+  first_seen_at: string;
   last_seen_at: string;
   revenue: number | string;
   ctwa_clid: string | null;
@@ -160,12 +161,18 @@ export default function Dashboard() {
     "campaign"
   );
 
-  async function load() {
+  async function load(
+    rangeSince = since,
+    rangeUntil = until
+  ) {
     setLoading(true);
     setError("");
 
     try {
-      const params = new URLSearchParams();
+      const params = new URLSearchParams({
+        since: rangeSince,
+        until: rangeUntil
+      });
 
       if (statusFilter) params.set("status", statusFilter);
       if (sourceFilter) params.set("source", sourceFilter);
@@ -377,7 +384,9 @@ export default function Dashboard() {
     setSince(nextSince);
     setUntil(nextUntil);
 
-    // Date presets only read cache. They do NOT call Meta.
+    // Date presets filter BOTH CRM leads and cached performance.
+    // They do NOT call Meta.
+    load(nextSince, nextUntil);
     loadPerformanceCache(nextSince, nextUntil);
   }
 
@@ -512,7 +521,7 @@ export default function Dashboard() {
           <div>
             <h2 style={{ margin: 0, fontSize: 21 }}>Performa Iklan</h2>
             <div className="sub" style={{ fontSize: 13 }}>
-              Spend Meta dari cache terakhir + funnel dan revenue CRM. Refresh biasa tidak memanggil Meta.
+              Filter tanggal berlaku ke Spend Meta, kartu lead, funnel, dan tabel lead berdasarkan waktu pertama lead masuk CRM. Refresh biasa tidak memanggil Meta.
             </div>
           </div>
 
@@ -551,11 +560,14 @@ export default function Dashboard() {
             />
             <button
               className="refresh"
-              onClick={() => loadPerformanceCache()}
-              disabled={performanceLoading}
-              title="Membaca cache saja, tanpa request ke Meta"
+              onClick={() => {
+                load(since, until);
+                loadPerformanceCache(since, until);
+              }}
+              disabled={performanceLoading || loading}
+              title="Memfilter lead CRM + membaca cache performa, tanpa request ke Meta"
             >
-              {performanceLoading ? "Memuat…" : "Terapkan Cache"}
+              {performanceLoading || loading ? "Memuat…" : "Terapkan Filter"}
             </button>
 
             <button
@@ -782,6 +794,22 @@ export default function Dashboard() {
         </div>
       </section>
 
+      <div
+        className="sub"
+        style={{
+          margin: "4px 0 8px",
+          display: "flex",
+          gap: 8,
+          flexWrap: "wrap",
+          alignItems: "center"
+        }}
+      >
+        <strong>Periode Lead:</strong>
+        <span>{since} s.d. {until}</span>
+        <span>•</span>
+        <span>Lead dihitung dari waktu pertama kali masuk CRM.</span>
+      </div>
+
       <div className="funnel">
         {STATUSES.map((status) => (
           <span className="pill" key={status}>
@@ -825,14 +853,15 @@ export default function Dashboard() {
 
       <section className="panel">
         <div className="table-wrap">
-          <table style={{ minWidth: 1450 }}>
+          <table style={{ minWidth: 1600 }}>
             <thead>
               <tr>
                 <th>Lead</th>
                 <th>Sumber</th>
                 <th>Campaign / Ad Set / Ad</th>
                 <th>Pesan terakhir</th>
-                <th>Waktu</th>
+                <th>Masuk Lead</th>
+                <th>Aktivitas Terakhir</th>
                 <th>Status</th>
                 <th>Revenue</th>
                 <th>Meta CAPI</th>
@@ -911,7 +940,14 @@ export default function Dashboard() {
                         </div>
                       </td>
 
-                      <td>{dateTime(lead.last_seen_at)}</td>
+                      <td style={{ minWidth: 125 }}>
+                        <div className="name">{dateTime(lead.first_seen_at)}</div>
+                        <div className="sub">Pertama masuk CRM</div>
+                      </td>
+
+                      <td style={{ minWidth: 125 }}>
+                        {dateTime(lead.last_seen_at)}
+                      </td>
 
                       <td>
                         <select
