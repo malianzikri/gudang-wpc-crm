@@ -7,7 +7,7 @@ Flow: **Meta Ads / WhatsApp → webhook → lead → Qualified → Quotation →
 - Pesan masuk otomatis disimpan ke Supabase.
 - Referral Click-to-WhatsApp disimpan: `source_id` (Ad ID), `source_url`, `headline`, `body`, `media_type`.
 - Dashboard lead + filter.
-- Status sesuai workflow WPC: Chat Builder, Tanya Aja, Qualified, Quotation Dikirim, Hot, Closing, Tidak Layak.
+- Status workflow V2: Chat Builder, Tanya Kebutuhan, Estimasi Dikirim, Foto Area Diterima, Qualified, Survey Ditawarkan, Survey Terjadwal, Quotation Final, Hot, Closing, Tidak Layak.
 - Revenue closing.
 - Riwayat perubahan status.
 - Basic Auth untuk dashboard.

@@ -5,7 +5,7 @@ create table if not exists public.leads (
   wa_id text unique not null,
   phone text,
   name text,
-  status text not null default 'Chat Builder' check (status in ('Chat Builder','Tanya Aja','Qualified','Quotation Dikirim','Hot','Closing','Tidak Layak')),
+  status text not null default 'Chat Builder' check (status in ('Chat Builder','Tanya Kebutuhan','Estimasi Dikirim','Foto Area Diterima','Qualified','Survey Ditawarkan','Survey Terjadwal','Quotation Final','Hot','Closing','Tidak Layak')),
   source text not null default 'WhatsApp Organic',
   source_type text,
   source_id text,
@@ -19,6 +19,9 @@ create table if not exists public.leads (
   last_seen_at timestamptz not null default now(),
   revenue numeric(14,2) not null default 0,
   closed_at timestamptz,
+  closing_trigger text,
+  is_historical boolean not null default false,
+  historical_imported_at timestamptz,
   notes text,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()

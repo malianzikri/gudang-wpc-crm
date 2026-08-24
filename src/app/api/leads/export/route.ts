@@ -96,8 +96,11 @@ export async function GET(request: Request) {
 
     if (type === "high_intent") {
       query = query.in("status", [
+        "Foto Area Diterima",
         "Qualified",
-        "Quotation Dikirim",
+        "Survey Ditawarkan",
+        "Survey Terjadwal",
+        "Quotation Final",
         "Hot"
       ]);
     } else if (type === "closing") {

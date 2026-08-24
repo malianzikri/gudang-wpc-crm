@@ -1,22 +1,11 @@
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase-admin";
 import { sendMessagingConversion } from "@/lib/meta-capi";
+import { QUALIFIED_STATUSES, STATUSES } from "@/lib/lead-pipeline";
 
-const ALLOWED_STATUS = new Set([
-  "Chat Builder",
-  "Tanya Aja",
-  "Qualified",
-  "Quotation Dikirim",
-  "Hot",
-  "Closing",
-  "Tidak Layak"
-]);
+const ALLOWED_STATUS = new Set<string>(STATUSES as readonly string[]);
 
-const LEAD_SIGNAL_STATUSES = new Set([
-  "Qualified",
-  "Quotation Dikirim",
-  "Hot"
-]);
+const LEAD_SIGNAL_STATUSES = QUALIFIED_STATUSES;
 
 export async function PATCH(
   request: Request,
@@ -71,6 +60,17 @@ export async function PATCH(
 
     if (body.notes !== undefined) {
       patch.notes = String(body.notes ?? "").slice(0, 5000);
+    }
+
+    if (body.closing_trigger !== undefined) {
+      patch.closing_trigger = String(body.closing_trigger ?? "").slice(0, 120) || null;
+    }
+
+    if (body.is_historical !== undefined) {
+      patch.is_historical = Boolean(body.is_historical);
+      if (patch.is_historical && !existing.historical_imported_at) {
+        patch.historical_imported_at = new Date().toISOString();
+      }
     }
 
     const { data: updated, error: updateError } = await db

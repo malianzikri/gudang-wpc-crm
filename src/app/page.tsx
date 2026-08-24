@@ -1,16 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-
-const STATUSES = [
-  "Chat Builder",
-  "Tanya Aja",
-  "Qualified",
-  "Quotation Dikirim",
-  "Hot",
-  "Closing",
-  "Tidak Layak"
-];
+import { HIGH_INTENT_STATUSES, STATUSES, statusRank } from "@/lib/lead-pipeline";
 
 type Lead = {
   id: string;
@@ -40,7 +31,9 @@ type PerformanceMetrics = {
   reach: number;
   clicks: number;
   leads: number;
+  estimate: number;
   qualified: number;
+  survey: number;
   quotation: number;
   hot: number;
   closing: number;
@@ -61,6 +54,7 @@ type PerformanceResponse = {
   since: string;
   until: string;
   summary: PerformanceMetrics;
+  closing_activity?: { closing: number; revenue: number };
   campaigns: Array<{
     id: string;
     campaign_name: string;
@@ -82,6 +76,34 @@ type PerformanceResponse = {
   sync_skipped?: boolean;
   sync_error?: string | null;
 };
+
+type LeadSummary = {
+  total: number;
+  highIntent: number;
+  survey: number;
+  closing: number;
+  revenue: number;
+  statusCounts: Record<string, number>;
+  sourceTotals: Record<string, number>;
+  sources: Array<{
+    key: string;
+    label: string;
+    total: number;
+    closing: number;
+    revenue: number;
+    statuses: Record<string, number>;
+  }>;
+};
+
+type SortKey =
+  | "name"
+  | "source"
+  | "campaign"
+  | "last_message"
+  | "first_seen_at"
+  | "last_seen_at"
+  | "status"
+  | "revenue";
 
 function rupiah(value: number) {
   return new Intl.NumberFormat("id-ID", {
@@ -127,7 +149,7 @@ function capiLabel(lead: Lead) {
   if (lead.capi_last_error) return "CAPI error";
   if (lead.source === "Meta Ads" && lead.ctwa_clid) return "Siap CAPI";
   if (lead.source === "Meta Ads") return "Tanpa CTWA ID";
-  return "Organic";
+  return "Non-Meta";
 }
 
 export default function Dashboard() {
@@ -139,6 +161,9 @@ export default function Dashboard() {
   }, []);
 
   const [leads, setLeads] = useState<Lead[]>([]);
+  const [leadSummary, setLeadSummary] = useState<LeadSummary | null>(null);
+  const [sortKey, setSortKey] = useState<SortKey>("last_seen_at");
+  const [sortDirection, setSortDirection] = useState<"asc" | "desc">("desc");
   const [drafts, setDrafts] = useState<
     Record<string, { status: string; revenue: string }>
   >({});
@@ -192,6 +217,7 @@ export default function Dashboard() {
       }
 
       setLeads(json.leads);
+      setLeadSummary(json.summary ?? null);
 
       const nextDrafts: Record<
         string,
@@ -420,12 +446,13 @@ export default function Dashboard() {
     : 0;
 
   const summary = useMemo(() => {
-    const highIntent = leads.filter((l) =>
-      ["Qualified", "Quotation Dikirim", "Hot", "Closing"].includes(l.status)
+    if (leadSummary) return leadSummary;
+
+    const highIntent = leads.filter((l) => HIGH_INTENT_STATUSES.has(l.status)).length;
+    const survey = leads.filter((l) =>
+      ["Survey Ditawarkan", "Survey Terjadwal", "Quotation Final", "Hot", "Closing"].includes(l.status)
     ).length;
-
     const closing = leads.filter((l) => l.status === "Closing").length;
-
     const revenue = leads
       .filter((l) => l.status === "Closing")
       .reduce((sum, l) => sum + Number(l.revenue || 0), 0);
@@ -433,19 +460,74 @@ export default function Dashboard() {
     return {
       total: leads.length,
       highIntent,
+      survey,
       closing,
-      revenue
+      revenue,
+      statusCounts: Object.fromEntries(
+        STATUSES.map((status) => [status, leads.filter((l) => l.status === status).length])
+      ),
+      sourceTotals: {},
+      sources: []
     };
-  }, [leads]);
+  }, [leadSummary, leads]);
 
-  const statusCounts = useMemo(() => {
-    return Object.fromEntries(
-      STATUSES.map((s) => [
-        s,
-        leads.filter((l) => l.status === s).length
-      ])
-    );
-  }, [leads]);
+  const statusCounts = summary.statusCounts ?? {};
+
+  const sortedLeads = useMemo(() => {
+    const copy = [...leads];
+
+    const valueFor = (lead: Lead) => {
+      if (sortKey === "name") return String(lead.name || lead.phone || lead.wa_id || "").toLowerCase();
+      if (sortKey === "source") return String(lead.source || "").toLowerCase();
+      if (sortKey === "campaign") return String(lead.campaign_name || lead.ad_name || "").toLowerCase();
+      if (sortKey === "last_message") return String(lead.last_message || "").toLowerCase();
+      if (sortKey === "first_seen_at") return new Date(lead.first_seen_at).getTime();
+      if (sortKey === "last_seen_at") return new Date(lead.last_seen_at).getTime();
+      if (sortKey === "status") return statusRank(lead.status);
+      if (sortKey === "revenue") return Number(lead.revenue || 0);
+      return "";
+    };
+
+    copy.sort((a, b) => {
+      const av = valueFor(a);
+      const bv = valueFor(b);
+      let result = 0;
+
+      if (typeof av === "number" && typeof bv === "number") result = av - bv;
+      else result = String(av).localeCompare(String(bv), "id");
+
+      return sortDirection === "asc" ? result : -result;
+    });
+
+    return copy;
+  }, [leads, sortKey, sortDirection]);
+
+  function toggleSort(nextKey: SortKey) {
+    if (sortKey === nextKey) {
+      setSortDirection((current) => (current === "asc" ? "desc" : "asc"));
+      return;
+    }
+
+    setSortKey(nextKey);
+    setSortDirection(nextKey === "name" || nextKey === "source" || nextKey === "campaign" ? "asc" : "desc");
+  }
+
+  function sortLabel(label: string, key: SortKey) {
+    const arrow = sortKey === key ? (sortDirection === "asc" ? " ↑" : " ↓") : " ↕";
+    return `${label}${arrow}`;
+  }
+
+  function sourceStageCount(statuses: Record<string, number>, stage: string) {
+    if (stage === "Chat") return (statuses["Chat Builder"] || 0) + (statuses["Tanya Kebutuhan"] || 0);
+    if (stage === "Estimasi") return statuses["Estimasi Dikirim"] || 0;
+    if (stage === "Foto") return statuses["Foto Area Diterima"] || 0;
+    if (stage === "Qualified") return statuses["Qualified"] || 0;
+    if (stage === "Survey") return (statuses["Survey Ditawarkan"] || 0) + (statuses["Survey Terjadwal"] || 0);
+    if (stage === "Quotation") return statuses["Quotation Final"] || 0;
+    if (stage === "Hot") return statuses["Hot"] || 0;
+    if (stage === "Closing") return statuses["Closing"] || 0;
+    return 0;
+  }
 
   const performanceRows =
     performanceGroup === "campaign"
@@ -457,7 +539,7 @@ export default function Dashboard() {
       <div className="header">
         <div>
           <h1>Gudang WPC CRM</h1>
-          <p>Tracking WhatsApp → qualified → quotation → closing.</p>
+          <p>Tracking WhatsApp → kebutuhan → estimasi → survey → quotation final → closing.</p>
         </div>
 
         <div style={{ display: "flex", gap: 8 }}>
@@ -505,8 +587,28 @@ export default function Dashboard() {
         </div>
 
         <div className="card">
+          <div className="label">Meta Ads</div>
+          <div className="value">{summary.sourceTotals?.meta ?? 0}</div>
+        </div>
+
+        <div className="card">
+          <div className="label">Organic</div>
+          <div className="value">{summary.sourceTotals?.organic ?? 0}</div>
+        </div>
+
+        <div className="card">
+          <div className="label">Broadcast</div>
+          <div className="value">{summary.sourceTotals?.broadcast ?? 0}</div>
+        </div>
+
+        <div className="card">
           <div className="label">High Intent</div>
           <div className="value">{summary.highIntent}</div>
+        </div>
+
+        <div className="card">
+          <div className="label">Masuk Tahap Survey</div>
+          <div className="value">{summary.survey}</div>
         </div>
 
         <div className="card">
@@ -517,6 +619,56 @@ export default function Dashboard() {
         <div className="card">
           <div className="label">Revenue Closing</div>
           <div className="value">{rupiah(summary.revenue)}</div>
+        </div>
+      </section>
+
+      <section className="card" style={{ marginBottom: 18, padding: 0, overflow: "hidden" }}>
+        <div style={{ padding: "16px 18px 10px" }}>
+          <h2 style={{ margin: 0, fontSize: 18 }}>Sumber & Status Lead</h2>
+          <div className="sub">Ringkasan berdasarkan tanggal pertama lead masuk. Jadi kelihatan Meta, organic, broadcast, dan sumber lain berhenti di tahap mana.</div>
+        </div>
+        <div className="table-wrap">
+          <table style={{ minWidth: 980 }}>
+            <thead>
+              <tr>
+                <th>Sumber</th>
+                <th>Total</th>
+                <th>Chat / Tanya</th>
+                <th>Estimasi</th>
+                <th>Foto Area</th>
+                <th>Qualified</th>
+                <th>Survey</th>
+                <th>Quotation Final</th>
+                <th>Hot</th>
+                <th>Closing</th>
+                <th>Revenue</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(summary.sources ?? []).map((row) => (
+                <tr key={row.key}>
+                  <td><div className="name">{row.label}</div></td>
+                  <td>{row.total}</td>
+                  <td>{sourceStageCount(row.statuses, "Chat")}</td>
+                  <td>{sourceStageCount(row.statuses, "Estimasi")}</td>
+                  <td>{sourceStageCount(row.statuses, "Foto")}</td>
+                  <td>{sourceStageCount(row.statuses, "Qualified")}</td>
+                  <td>{sourceStageCount(row.statuses, "Survey")}</td>
+                  <td>{sourceStageCount(row.statuses, "Quotation")}</td>
+                  <td>{sourceStageCount(row.statuses, "Hot")}</td>
+                  <td>{row.closing}</td>
+                  <td>{rupiah(row.revenue)}</td>
+                </tr>
+              ))}
+              {(summary.sources ?? []).length === 0 && (
+                <tr>
+                  <td colSpan={11} style={{ textAlign: "center", color: "#667085", padding: 24 }}>
+                    Belum ada lead pada periode ini.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
         </div>
       </section>
 
@@ -652,7 +804,7 @@ export default function Dashboard() {
         <div
           style={{
             display: "grid",
-            gridTemplateColumns: "repeat(6, minmax(130px, 1fr))",
+            gridTemplateColumns: "repeat(8, minmax(130px, 1fr))",
             gap: 10,
             marginBottom: 16,
             overflowX: "auto"
@@ -661,10 +813,12 @@ export default function Dashboard() {
           {[
             ["Spend", rupiah(performance?.summary?.spend ?? 0)],
             ["Lead", compactNumber(performance?.summary?.leads ?? 0)],
+            ["Estimasi", compactNumber(performance?.summary?.estimate ?? 0)],
             ["Qualified", compactNumber(performance?.summary?.qualified ?? 0)],
+            ["Survey", compactNumber(performance?.summary?.survey ?? 0)],
             ["Closing", compactNumber(performance?.summary?.closing ?? 0)],
-            ["Revenue", rupiah(performance?.summary?.revenue ?? 0)],
-            ["ROAS", roas(performance?.summary?.roas ?? 0)]
+            ["Revenue Cohort", rupiah(performance?.summary?.revenue ?? 0)],
+            ["ROAS Cohort", roas(performance?.summary?.roas ?? 0)]
           ].map(([label, value]) => (
             <div
               key={label}
@@ -679,6 +833,21 @@ export default function Dashboard() {
               <div style={{ fontWeight: 800, fontSize: 20 }}>{value}</div>
             </div>
           ))}
+        </div>
+
+        <div
+          className="sub"
+          style={{
+            marginBottom: 14,
+            padding: "10px 12px",
+            border: "1px solid var(--border)",
+            borderRadius: 10,
+            background: "#fafafa"
+          }}
+        >
+          <strong>Catatan atribusi:</strong> Revenue Cohort mengikuti tanggal pertama lead masuk CRM.
+          {" "}Closing yang benar-benar terjadi pada periode ini: <strong>{performance?.closing_activity?.closing ?? 0}</strong>
+          {" "}dengan revenue <strong>{rupiah(performance?.closing_activity?.revenue ?? 0)}</strong>.
         </div>
 
         <div
@@ -716,8 +885,10 @@ export default function Dashboard() {
                 {performanceGroup === "ad" && <th>Campaign / Ad Set</th>}
                 <th>Spend</th>
                 <th>Lead</th>
+                <th>Estimasi</th>
                 <th>Qualified</th>
-                <th>Quotation</th>
+                <th>Survey</th>
+                <th>Quotation Final</th>
                 <th>Hot</th>
                 <th>Closing</th>
                 <th>Revenue</th>
@@ -752,10 +923,12 @@ export default function Dashboard() {
 
                     <td>{rupiah(row.metrics.spend)}</td>
                     <td>{row.metrics.leads}</td>
+                    <td>{row.metrics.estimate}</td>
                     <td>
                       {row.metrics.qualified}
                       <div className="sub">{pct(row.metrics.qualified_rate)}</div>
                     </td>
+                    <td>{row.metrics.survey}</td>
                     <td>{row.metrics.quotation}</td>
                     <td>{row.metrics.hot}</td>
                     <td>{row.metrics.closing}</td>
@@ -787,7 +960,7 @@ export default function Dashboard() {
               {!performanceLoading && performanceRows.length === 0 && (
                 <tr>
                   <td
-                    colSpan={performanceGroup === "campaign" ? 13 : 14}
+                    colSpan={performanceGroup === "campaign" ? 15 : 16}
                     style={{ textAlign: "center", color: "#667085", padding: 30 }}
                   >
                     Belum ada data performa pada periode ini.
@@ -798,7 +971,7 @@ export default function Dashboard() {
               {performanceLoading && (
                 <tr>
                   <td
-                    colSpan={performanceGroup === "campaign" ? 13 : 14}
+                    colSpan={performanceGroup === "campaign" ? 15 : 16}
                     style={{ textAlign: "center", color: "#667085", padding: 30 }}
                   >
                     Memuat performa Meta Ads…
@@ -862,8 +1035,11 @@ export default function Dashboard() {
           onChange={(e) => setSourceFilter(e.target.value)}
         >
           <option value="">Semua sumber</option>
-          <option value="Meta Ads">Meta Ads</option>
-          <option value="WhatsApp Organic">WhatsApp Organic</option>
+          <option value="meta">Meta Ads</option>
+          <option value="organic">Organic</option>
+          <option value="broadcast">Broadcast</option>
+          <option value="walkin">Walk-in</option>
+          <option value="referral">Referral</option>
         </select>
       </section>
 
@@ -897,7 +1073,7 @@ export default function Dashboard() {
         >
           <option value="all">All Leads</option>
           <option value="high_intent">
-            High Intent (Qualified / Quotation / Hot)
+            High Intent (Foto / Qualified / Survey / Quotation Final / Hot)
           </option>
           <option value="closing">Closing</option>
         </select>
@@ -912,14 +1088,14 @@ export default function Dashboard() {
           <table style={{ minWidth: 1600 }}>
             <thead>
               <tr>
-                <th>Lead</th>
-                <th>Sumber</th>
-                <th>Campaign / Ad Set / Ad</th>
-                <th>Pesan terakhir</th>
-                <th>Masuk Lead</th>
-                <th>Aktivitas Terakhir</th>
-                <th>Status</th>
-                <th>Revenue</th>
+                <th><button className="sort-button" onClick={() => toggleSort("name")}>{sortLabel("Lead", "name")}</button></th>
+                <th><button className="sort-button" onClick={() => toggleSort("source")}>{sortLabel("Sumber", "source")}</button></th>
+                <th><button className="sort-button" onClick={() => toggleSort("campaign")}>{sortLabel("Campaign / Ad Set / Ad", "campaign")}</button></th>
+                <th><button className="sort-button" onClick={() => toggleSort("last_message")}>{sortLabel("Pesan terakhir", "last_message")}</button></th>
+                <th><button className="sort-button" onClick={() => toggleSort("first_seen_at")}>{sortLabel("Masuk Lead", "first_seen_at")}</button></th>
+                <th><button className="sort-button" onClick={() => toggleSort("last_seen_at")}>{sortLabel("Aktivitas Terakhir", "last_seen_at")}</button></th>
+                <th><button className="sort-button" onClick={() => toggleSort("status")}>{sortLabel("Status", "status")}</button></th>
+                <th><button className="sort-button" onClick={() => toggleSort("revenue")}>{sortLabel("Revenue", "revenue")}</button></th>
                 <th>Meta CAPI</th>
                 <th></th>
               </tr>
@@ -927,7 +1103,7 @@ export default function Dashboard() {
 
             <tbody>
               {!loading &&
-                leads.map((lead) => {
+                sortedLeads.map((lead) => {
                   const draft = drafts[lead.id] ?? {
                     status: lead.status,
                     revenue: String(Number(lead.revenue || 0))

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase-admin";
 import { fetchAdInsights, resolveAdAccountId } from "@/lib/meta-insights";
+import { ESTIMATE_STATUSES, HOT_STATUSES, QUALIFIED_STATUSES, QUOTATION_STATUSES, SURVEY_STATUSES, normalizeLeadStatus } from "@/lib/lead-pipeline";
 
 export const runtime = "nodejs";
 
@@ -25,7 +26,9 @@ type Metrics = {
   reach: number;
   clicks: number;
   leads: number;
+  estimate: number;
   qualified: number;
+  survey: number;
   quotation: number;
   hot: number;
   closing: number;
@@ -85,7 +88,9 @@ function emptyMetrics(): Metrics {
     reach: 0,
     clicks: 0,
     leads: 0,
+    estimate: 0,
     qualified: 0,
+    survey: 0,
     quotation: 0,
     hot: 0,
     closing: 0,
@@ -110,27 +115,15 @@ function enrich(m: Metrics) {
 
 function addLeadToMetrics(metrics: Metrics, lead: LeadRow) {
   metrics.leads += 1;
+  const status = normalizeLeadStatus(lead.status);
 
-  const qualifiedStatuses = new Set([
-    "Qualified",
-    "Quotation Dikirim",
-    "Hot",
-    "Closing"
-  ]);
+  if (ESTIMATE_STATUSES.has(status)) metrics.estimate += 1;
+  if (QUALIFIED_STATUSES.has(status)) metrics.qualified += 1;
+  if (SURVEY_STATUSES.has(status)) metrics.survey += 1;
+  if (QUOTATION_STATUSES.has(status)) metrics.quotation += 1;
+  if (HOT_STATUSES.has(status)) metrics.hot += 1;
 
-  const quotationStatuses = new Set([
-    "Quotation Dikirim",
-    "Hot",
-    "Closing"
-  ]);
-
-  const hotStatuses = new Set(["Hot", "Closing"]);
-
-  if (qualifiedStatuses.has(lead.status)) metrics.qualified += 1;
-  if (quotationStatuses.has(lead.status)) metrics.quotation += 1;
-  if (hotStatuses.has(lead.status)) metrics.hot += 1;
-
-  if (lead.status === "Closing") {
+  if (status === "Closing") {
     metrics.closing += 1;
     metrics.revenue += num(lead.revenue);
   }
@@ -238,7 +231,12 @@ async function buildPerformanceResponse(
   }
 
   for (const lead of (leads ?? []) as LeadRow[]) {
-    const adId = String(lead.source_id ?? "");
+    let adId = String(lead.source_id ?? "");
+
+    if (!adId && lead.ad_name) {
+      const byName = [...adMap.entries()].find(([, row]) => row.ad_name === lead.ad_name);
+      if (byName) adId = byName[0];
+    }
 
     if (adId) {
       if (!adMap.has(adId)) {
@@ -256,7 +254,20 @@ async function buildPerformanceResponse(
       addLeadToMetrics(adMap.get(adId).metrics, lead);
     }
 
-    const campaignId = String(lead.campaign_id ?? "");
+    let campaignId = String(lead.campaign_id ?? "");
+
+    if (!campaignId && lead.campaign_name) {
+      const byName = [...campaignMap.entries()].find(
+        ([, row]) => row.campaign_name === lead.campaign_name
+      );
+      if (byName) campaignId = byName[0];
+    }
+
+    // Historical/pre-CRM rows may only know the campaign name. Keep them
+    // attributable by name rather than dropping them from campaign metrics.
+    if (!campaignId && lead.campaign_name) {
+      campaignId = `name:${lead.campaign_name}`;
+    }
 
     if (campaignId) {
       if (!campaignMap.has(campaignId)) {
@@ -293,12 +304,32 @@ async function buildPerformanceResponse(
     summary.reach += campaign.metrics.reach;
     summary.clicks += campaign.metrics.clicks;
     summary.leads += campaign.metrics.leads;
+    summary.estimate += campaign.metrics.estimate;
     summary.qualified += campaign.metrics.qualified;
+    summary.survey += campaign.metrics.survey;
     summary.quotation += campaign.metrics.quotation;
     summary.hot += campaign.metrics.hot;
     summary.closing += campaign.metrics.closing;
     summary.revenue += campaign.metrics.revenue;
   }
+
+  const { data: closingRows, error: closingError } = await db
+    .from("leads")
+    .select("status,revenue,closed_at")
+    .eq("status", "Closing")
+    .gte("closed_at", startOfDayJakarta(since))
+    .lte("closed_at", endOfDayJakarta(until))
+    .limit(5000);
+
+  if (closingError) throw closingError;
+
+  const closingActivity = {
+    closing: (closingRows ?? []).length,
+    revenue: (closingRows ?? []).reduce(
+      (sum: number, row: any) => sum + num(row.revenue),
+      0
+    )
+  };
 
   return {
     ok: true,
@@ -307,6 +338,7 @@ async function buildPerformanceResponse(
     ad_account_id:
       meta.ad_account_id ?? meta.cache?.ad_account_id ?? null,
     summary: enrich(summary),
+    closing_activity: closingActivity,
     campaigns,
     ads,
     ...cacheTiming(meta.cache ?? null),
