@@ -108,10 +108,10 @@ export async function POST(request: Request) {
           if (findError) throw findError;
 
           let leadId: string;
+          const touchSource = sourceId ? "Meta Ads" : "WhatsApp Organic";
 
-          const attributionPatch = sourceId
+          const metaTouchPatch = sourceId
             ? {
-                source: "Meta Ads",
                 source_type: referral?.source_type ?? null,
                 source_id: sourceId,
                 source_url: referral?.source_url ?? null,
@@ -139,8 +139,14 @@ export async function POST(request: Request) {
                 phone: `+${waId}`,
                 name,
                 status: "Chat Builder",
+                // First touch is set ONCE when the lead is first created.
                 source: sourceId ? "Meta Ads" : "WhatsApp Organic",
-                ...attributionPatch,
+                source_confidence: sourceId
+                  ? "live_meta_referral"
+                  : "live_organic",
+                ...metaTouchPatch,
+                last_touch_source: touchSource,
+                last_touch_at: messageTime,
                 first_message: messageText,
                 last_message: messageText,
                 first_seen_at: messageTime,
@@ -168,30 +174,43 @@ export async function POST(request: Request) {
               last_seen_at: messageTime
             };
 
-            // First CTWA attribution is sticky. Later organic or ad messages
-            // must not overwrite the original click that started the lead.
-            if (sourceId && !existing.source_id) {
-              Object.assign(patch, attributionPatch);
-            } else {
-              if (ctwaClid && !existing.ctwa_clid) {
-                patch.ctwa_clid = ctwaClid;
+            // IMPORTANT: existing.source is sticky FIRST-TOUCH attribution.
+            // A later organic reply or a later Meta click must not rewrite it.
+            // Current marketing touch is tracked separately.
+            if (sourceId) {
+              patch.last_touch_source = "Meta Ads";
+              patch.last_touch_at = messageTime;
+
+              if (!existing.source_id) {
+                Object.assign(patch, metaTouchPatch);
+              } else {
+                if (ctwaClid && !existing.ctwa_clid) {
+                  patch.ctwa_clid = ctwaClid;
+                }
+
+                if (
+                  existing.source_id &&
+                  !existing.ad_name &&
+                  metaAttribution
+                ) {
+                  Object.assign(patch, {
+                    ad_name: metaAttribution.ad_name ?? null,
+                    adset_id: metaAttribution.adset_id ?? null,
+                    adset_name: metaAttribution.adset_name ?? null,
+                    campaign_id: metaAttribution.campaign_id ?? null,
+                    campaign_name: metaAttribution.campaign_name ?? null,
+                    creative_id: metaAttribution.creative_id ?? null,
+                    meta_enriched_at: new Date().toISOString()
+                  });
+                }
               }
 
-              if (
-                existing.source_id &&
-                !existing.ad_name &&
-                metaAttribution
-              ) {
-                Object.assign(patch, {
-                  ad_name: metaAttribution.ad_name ?? null,
-                  adset_id: metaAttribution.adset_id ?? null,
-                  adset_name: metaAttribution.adset_name ?? null,
-                  campaign_id: metaAttribution.campaign_id ?? null,
-                  campaign_name: metaAttribution.campaign_name ?? null,
-                  creative_id: metaAttribution.creative_id ?? null,
-                  meta_enriched_at: new Date().toISOString()
-                });
-              }
+              // A fresh CTWA click is valid current attribution, so a lead that
+              // was historical-only may participate in CAPI again from here.
+              if (ctwaClid) patch.suppress_capi = false;
+            } else if (!existing.last_touch_source) {
+              patch.last_touch_source = existing.source || "WhatsApp Organic";
+              patch.last_touch_at = messageTime;
             }
 
             const { error: updateError } = await db

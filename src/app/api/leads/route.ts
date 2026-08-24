@@ -4,7 +4,6 @@ import {
   HIGH_INTENT_STATUSES,
   SOURCE_GROUPS,
   sourceGroup,
-  sourceGroupLabel,
   normalizeLeadStatus
 } from "@/lib/lead-pipeline";
 
@@ -32,7 +31,9 @@ function applySourceGroup(query: any, source: string | null) {
   if (!source) return query;
 
   if (source === "meta") return query.eq("source", "Meta Ads");
-  if (source === "broadcast") return query.ilike("source", "%Broadcast%");
+  if (source === "legacy") {
+    return query.or("source.ilike.%Legacy%,source.ilike.%Belum Teratribusi%");
+  }
   if (source === "walkin") return query.ilike("source", "%Walk%");
   if (source === "referral") return query.ilike("source", "%Refer%");
 
@@ -63,18 +64,26 @@ function buildSummary(rows: any[]) {
   let survey = 0;
   let closing = 0;
   let revenue = 0;
+  let broadcastReactivation = 0;
   const statusCounts: Record<string, number> = {};
+  const touchTotals: Record<string, number> = {};
 
   for (const row of rows) {
     const status = normalizeLeadStatus(row.status);
     const group = sourceGroup(row.source);
     const sourceStats = sourceMap.get(group);
+    const touch = String(row.last_touch_source || "").trim();
 
     statusCounts[status] = (statusCounts[status] || 0) + 1;
 
     if (HIGH_INTENT_STATUSES.has(status)) highIntent += 1;
-    if (["Survey Ditawarkan", "Survey Terjadwal", "Quotation Final", "Hot", "Closing"].includes(status)) {
-      survey += 1;
+    if (["Survey Ditawarkan", "Survey Terjadwal"].includes(status)) survey += 1;
+
+    if (touch) {
+      touchTotals[touch] = (touchTotals[touch] || 0) + 1;
+      if (touch.toLowerCase().includes("broadcast")) {
+        broadcastReactivation += 1;
+      }
     }
 
     if (status === "Closing") {
@@ -101,6 +110,8 @@ function buildSummary(rows: any[]) {
     survey,
     closing,
     revenue,
+    broadcastReactivation,
+    touchTotals,
     statusCounts,
     sources,
     sourceTotals: Object.fromEntries(
@@ -123,11 +134,10 @@ export async function GET(request: Request) {
     const since = validDate(url.searchParams.get("since"));
     const until = validDate(url.searchParams.get("until"));
 
-    // Summary is date-cohort based and intentionally ignores table search/status/source
-    // filters so the top dashboard stays a stable view of the selected period.
+    // Summary is based on FIRST-TOUCH cohort date.
     let summaryQuery = db
       .from("leads")
-      .select("status,source,revenue,first_seen_at")
+      .select("status,source,last_touch_source,revenue,first_seen_at")
       .order("first_seen_at", { ascending: false })
       .limit(5000);
 
@@ -150,7 +160,7 @@ export async function GET(request: Request) {
     if (q) {
       const escaped = q.replace(/[%_,()]/g, "");
       query = query.or(
-        `name.ilike.%${escaped}%,phone.ilike.%${escaped}%,last_message.ilike.%${escaped}%,campaign_name.ilike.%${escaped}%`
+        `name.ilike.%${escaped}%,phone.ilike.%${escaped}%,last_message.ilike.%${escaped}%,campaign_name.ilike.%${escaped}%,manual_campaign.ilike.%${escaped}%`
       );
     }
 
@@ -172,7 +182,10 @@ export async function GET(request: Request) {
       ok: true,
       since,
       until,
-      leads: (data ?? []).map((lead: any) => ({ ...lead, status: normalizeLeadStatus(lead.status) })),
+      leads: (data ?? []).map((lead: any) => ({
+        ...lead,
+        status: normalizeLeadStatus(lead.status)
+      })),
       summary: buildSummary(summaryRows ?? [])
     });
   } catch (error: any) {

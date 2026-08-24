@@ -1,11 +1,12 @@
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase-admin";
 import { sendMessagingConversion } from "@/lib/meta-capi";
-import { QUALIFIED_STATUSES, STATUSES } from "@/lib/lead-pipeline";
+import { QUALIFIED_STATUSES, STATUSES, TOUCH_OPTIONS } from "@/lib/lead-pipeline";
 
 const ALLOWED_STATUS = new Set<string>(STATUSES as readonly string[]);
 
 const LEAD_SIGNAL_STATUSES = QUALIFIED_STATUSES;
+const ALLOWED_TOUCH = new Set<string>(TOUCH_OPTIONS as readonly string[]);
 
 export async function PATCH(
   request: Request,
@@ -66,6 +67,20 @@ export async function PATCH(
       patch.closing_trigger = String(body.closing_trigger ?? "").slice(0, 120) || null;
     }
 
+    if (body.last_touch_source !== undefined) {
+      const touch = String(body.last_touch_source ?? "").trim();
+
+      if (touch && !ALLOWED_TOUCH.has(touch)) {
+        return NextResponse.json(
+          { ok: false, error: "Invalid touch source" },
+          { status: 400 }
+        );
+      }
+
+      patch.last_touch_source = touch || null;
+      patch.last_touch_at = new Date().toISOString();
+    }
+
     if (body.is_historical !== undefined) {
       patch.is_historical = Boolean(body.is_historical);
       if (patch.is_historical && !existing.historical_imported_at) {
@@ -100,7 +115,8 @@ export async function PATCH(
       LEAD_SIGNAL_STATUSES.has(updated.status) &&
       !updated.capi_lead_sent_at &&
       updated.source === "Meta Ads" &&
-      updated.ctwa_clid
+      updated.ctwa_clid &&
+      !updated.suppress_capi
     ) {
       const leadResult = await sendMessagingConversion(
         updated,
@@ -142,7 +158,8 @@ export async function PATCH(
       Number(updated.revenue || 0) > 0 &&
       !updated.capi_purchase_sent_at &&
       updated.source === "Meta Ads" &&
-      updated.ctwa_clid
+      updated.ctwa_clid &&
+      !updated.suppress_capi
     ) {
       const purchaseResult = await sendMessagingConversion(
         updated,

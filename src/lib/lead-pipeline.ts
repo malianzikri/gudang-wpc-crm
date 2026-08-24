@@ -56,10 +56,7 @@ export const ESTIMATE_STATUSES = new Set<string>([
 
 export const SURVEY_STATUSES = new Set<string>([
   "Survey Ditawarkan",
-  "Survey Terjadwal",
-  "Quotation Final",
-  "Hot",
-  "Closing"
+  "Survey Terjadwal"
 ]);
 
 export const QUOTATION_STATUSES = new Set<string>([
@@ -70,10 +67,13 @@ export const QUOTATION_STATUSES = new Set<string>([
 
 export const HOT_STATUSES = new Set<string>(["Hot", "Closing"]);
 
+// `source` is FIRST-TOUCH / acquisition source and must stay sticky.
+// Broadcast is intentionally NOT an acquisition group. It is tracked as a
+// marketing touch in `last_touch_source`.
 export const SOURCE_GROUPS = [
   { key: "meta", label: "Meta Ads" },
-  { key: "organic", label: "Organic" },
-  { key: "broadcast", label: "Broadcast" },
+  { key: "organic", label: "WhatsApp Organic" },
+  { key: "legacy", label: "Legacy / Belum Teratribusi" },
   { key: "walkin", label: "Walk-in" },
   { key: "referral", label: "Referral" },
   { key: "other", label: "Lainnya" }
@@ -85,10 +85,10 @@ export function sourceGroup(source: string | null | undefined): SourceGroupKey {
   const value = String(source || "").trim().toLowerCase();
 
   if (value.includes("meta")) return "meta";
-  if (value.includes("broadcast")) return "broadcast";
+  if (value.includes("legacy") || value.includes("belum teratribusi")) return "legacy";
   if (value.includes("walk")) return "walkin";
   if (value.includes("refer")) return "referral";
-  if (value.includes("organic") || value.includes("whatsapp")) return "organic";
+  if (value.includes("organic") || value === "whatsapp") return "organic";
   return "other";
 }
 
@@ -96,7 +96,18 @@ export function sourceGroupLabel(key: SourceGroupKey) {
   return SOURCE_GROUPS.find((item) => item.key === key)?.label ?? "Lainnya";
 }
 
+export const TOUCH_OPTIONS = [
+  "WhatsApp Organic",
+  "Meta Ads",
+  "WhatsApp Broadcast",
+  "Follow-up Personal",
+  "Survey",
+  "Walk-in",
+  "Referral"
+] as const;
+
 export function statusRank(status: string) {
-  const index = (STATUSES as readonly string[]).indexOf(status);
-  return index === -1 ? 999 : index;
+  const normalized = normalizeLeadStatus(status);
+  const index = (STATUSES as readonly string[]).indexOf(normalized);
+  return index === -1 ? -1 : index;
 }

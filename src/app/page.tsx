@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { HIGH_INTENT_STATUSES, STATUSES, statusRank } from "@/lib/lead-pipeline";
+import { HIGH_INTENT_STATUSES, STATUSES, TOUCH_OPTIONS, statusRank } from "@/lib/lead-pipeline";
 
 type Lead = {
   id: string;
@@ -15,6 +15,11 @@ type Lead = {
   ad_name: string | null;
   adset_name: string | null;
   campaign_name: string | null;
+  manual_campaign: string | null;
+  last_touch_source: string | null;
+  last_touch_at: string | null;
+  is_historical: boolean;
+  suppress_capi: boolean;
   last_message: string | null;
   first_seen_at: string;
   last_seen_at: string;
@@ -83,6 +88,8 @@ type LeadSummary = {
   survey: number;
   closing: number;
   revenue: number;
+  broadcastReactivation: number;
+  touchTotals: Record<string, number>;
   statusCounts: Record<string, number>;
   sourceTotals: Record<string, number>;
   sources: Array<{
@@ -98,6 +105,7 @@ type LeadSummary = {
 type SortKey =
   | "name"
   | "source"
+  | "touch"
   | "campaign"
   | "last_message"
   | "first_seen_at"
@@ -144,6 +152,7 @@ function dateInputLocal(date: Date) {
 }
 
 function capiLabel(lead: Lead) {
+  if (lead.suppress_capi) return "Historical · CAPI off";
   if (lead.capi_purchase_sent_at) return "Purchase terkirim";
   if (lead.capi_lead_sent_at) return "Lead terkirim";
   if (lead.capi_last_error) return "CAPI error";
@@ -165,7 +174,7 @@ export default function Dashboard() {
   const [sortKey, setSortKey] = useState<SortKey>("last_seen_at");
   const [sortDirection, setSortDirection] = useState<"asc" | "desc">("desc");
   const [drafts, setDrafts] = useState<
-    Record<string, { status: string; revenue: string }>
+    Record<string, { status: string; revenue: string; last_touch_source: string }>
   >({});
   const [loading, setLoading] = useState(true);
   const [savingId, setSavingId] = useState<string | null>(null);
@@ -221,13 +230,14 @@ export default function Dashboard() {
 
       const nextDrafts: Record<
         string,
-        { status: string; revenue: string }
+        { status: string; revenue: string; last_touch_source: string }
       > = {};
 
       for (const lead of json.leads) {
         nextDrafts[lead.id] = {
           status: lead.status,
-          revenue: String(Number(lead.revenue || 0))
+          revenue: String(Number(lead.revenue || 0)),
+          last_touch_source: lead.last_touch_source || lead.source || "WhatsApp Organic"
         };
       }
 
@@ -341,7 +351,8 @@ export default function Dashboard() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           status: draft.status,
-          revenue: Number(draft.revenue || 0)
+          revenue: Number(draft.revenue || 0),
+          last_touch_source: draft.last_touch_source
         })
       });
 
@@ -450,7 +461,7 @@ export default function Dashboard() {
 
     const highIntent = leads.filter((l) => HIGH_INTENT_STATUSES.has(l.status)).length;
     const survey = leads.filter((l) =>
-      ["Survey Ditawarkan", "Survey Terjadwal", "Quotation Final", "Hot", "Closing"].includes(l.status)
+      ["Survey Ditawarkan", "Survey Terjadwal"].includes(l.status)
     ).length;
     const closing = leads.filter((l) => l.status === "Closing").length;
     const revenue = leads
@@ -463,6 +474,8 @@ export default function Dashboard() {
       survey,
       closing,
       revenue,
+      broadcastReactivation: leads.filter((l) => String(l.last_touch_source || "").includes("Broadcast")).length,
+      touchTotals: {},
       statusCounts: Object.fromEntries(
         STATUSES.map((status) => [status, leads.filter((l) => l.status === status).length])
       ),
@@ -479,7 +492,8 @@ export default function Dashboard() {
     const valueFor = (lead: Lead) => {
       if (sortKey === "name") return String(lead.name || lead.phone || lead.wa_id || "").toLowerCase();
       if (sortKey === "source") return String(lead.source || "").toLowerCase();
-      if (sortKey === "campaign") return String(lead.campaign_name || lead.ad_name || "").toLowerCase();
+      if (sortKey === "touch") return String(lead.last_touch_source || "").toLowerCase();
+      if (sortKey === "campaign") return String(lead.campaign_name || lead.manual_campaign || lead.ad_name || "").toLowerCase();
       if (sortKey === "last_message") return String(lead.last_message || "").toLowerCase();
       if (sortKey === "first_seen_at") return new Date(lead.first_seen_at).getTime();
       if (sortKey === "last_seen_at") return new Date(lead.last_seen_at).getTime();
@@ -509,7 +523,7 @@ export default function Dashboard() {
     }
 
     setSortKey(nextKey);
-    setSortDirection(nextKey === "name" || nextKey === "source" || nextKey === "campaign" ? "asc" : "desc");
+    setSortDirection(nextKey === "name" || nextKey === "source" || nextKey === "touch" || nextKey === "campaign" ? "asc" : "desc");
   }
 
   function sortLabel(label: string, key: SortKey) {
@@ -597,8 +611,13 @@ export default function Dashboard() {
         </div>
 
         <div className="card">
-          <div className="label">Broadcast</div>
-          <div className="value">{summary.sourceTotals?.broadcast ?? 0}</div>
+          <div className="label">Belum Teratribusi</div>
+          <div className="value">{summary.sourceTotals?.legacy ?? 0}</div>
+        </div>
+
+        <div className="card">
+          <div className="label">Reaktivasi Broadcast</div>
+          <div className="value">{summary.broadcastReactivation ?? 0}</div>
         </div>
 
         <div className="card">
@@ -607,7 +626,7 @@ export default function Dashboard() {
         </div>
 
         <div className="card">
-          <div className="label">Masuk Tahap Survey</div>
+          <div className="label">Sedang Tahap Survey</div>
           <div className="value">{summary.survey}</div>
         </div>
 
@@ -625,7 +644,7 @@ export default function Dashboard() {
       <section className="card" style={{ marginBottom: 18, padding: 0, overflow: "hidden" }}>
         <div style={{ padding: "16px 18px 10px" }}>
           <h2 style={{ margin: 0, fontSize: 18 }}>Sumber & Status Lead</h2>
-          <div className="sub">Ringkasan berdasarkan tanggal pertama lead masuk. Jadi kelihatan Meta, organic, broadcast, dan sumber lain berhenti di tahap mana.</div>
+          <div className="sub">Ringkasan berdasarkan sumber pertama (first touch). Broadcast dipisahkan sebagai reaktivasi/touch, jadi tidak lagi mencuri kredit dari Meta atau Organic.</div>
         </div>
         <div className="table-wrap">
           <table style={{ minWidth: 980 }}>
@@ -996,7 +1015,7 @@ export default function Dashboard() {
         <strong>Periode Lead:</strong>
         <span>{since} s.d. {until}</span>
         <span>•</span>
-        <span>Lead dihitung dari waktu pertama kali masuk CRM.</span>
+        <span>Lead dihitung dari waktu first touch. Data lama hasil backfill tetap memakai tanggal lead aslinya.</span>
       </div>
 
       <div className="funnel">
@@ -1037,7 +1056,7 @@ export default function Dashboard() {
           <option value="">Semua sumber</option>
           <option value="meta">Meta Ads</option>
           <option value="organic">Organic</option>
-          <option value="broadcast">Broadcast</option>
+          <option value="legacy">Belum Teratribusi</option>
           <option value="walkin">Walk-in</option>
           <option value="referral">Referral</option>
         </select>
@@ -1085,11 +1104,12 @@ export default function Dashboard() {
 
       <section className="panel">
         <div className="table-wrap">
-          <table style={{ minWidth: 1600 }}>
+          <table style={{ minWidth: 1780 }}>
             <thead>
               <tr>
                 <th><button className="sort-button" onClick={() => toggleSort("name")}>{sortLabel("Lead", "name")}</button></th>
-                <th><button className="sort-button" onClick={() => toggleSort("source")}>{sortLabel("Sumber", "source")}</button></th>
+                <th><button className="sort-button" onClick={() => toggleSort("source")}>{sortLabel("First Touch", "source")}</button></th>
+                <th><button className="sort-button" onClick={() => toggleSort("touch")}>{sortLabel("Touch / Trigger", "touch")}</button></th>
                 <th><button className="sort-button" onClick={() => toggleSort("campaign")}>{sortLabel("Campaign / Ad Set / Ad", "campaign")}</button></th>
                 <th><button className="sort-button" onClick={() => toggleSort("last_message")}>{sortLabel("Pesan terakhir", "last_message")}</button></th>
                 <th><button className="sort-button" onClick={() => toggleSort("first_seen_at")}>{sortLabel("Masuk Lead", "first_seen_at")}</button></th>
@@ -1106,7 +1126,8 @@ export default function Dashboard() {
                 sortedLeads.map((lead) => {
                   const draft = drafts[lead.id] ?? {
                     status: lead.status,
-                    revenue: String(Number(lead.revenue || 0))
+                    revenue: String(Number(lead.revenue || 0)),
+                    last_touch_source: lead.last_touch_source || lead.source || "WhatsApp Organic"
                   };
 
                   return (
@@ -1138,12 +1159,37 @@ export default function Dashboard() {
                         )}
                       </td>
 
+                      <td style={{ minWidth: 180 }}>
+                        <select
+                          className="status-select"
+                          value={draft.last_touch_source}
+                          onChange={(e) =>
+                            setDrafts((d) => ({
+                              ...d,
+                              [lead.id]: {
+                                ...draft,
+                                last_touch_source: e.target.value
+                              }
+                            }))
+                          }
+                        >
+                          {TOUCH_OPTIONS.map((touch) => (
+                            <option key={touch} value={touch}>
+                              {touch}
+                            </option>
+                          ))}
+                        </select>
+                        {lead.is_historical && (
+                          <div className="sub">Historical / pre-CRM</div>
+                        )}
+                      </td>
+
                       <td style={{ minWidth: 280 }}>
-                        {lead.campaign_name ? (
+                        {(lead.campaign_name || lead.manual_campaign) ? (
                           <>
                             <div>
                               <strong>Campaign:</strong>{" "}
-                              {lead.campaign_name}
+                              {lead.campaign_name || lead.manual_campaign}
                             </div>
                             <div className="sub">
                               <strong>Ad Set:</strong>{" "}
@@ -1174,7 +1220,7 @@ export default function Dashboard() {
 
                       <td style={{ minWidth: 125 }}>
                         <div className="name">{dateTime(lead.first_seen_at)}</div>
-                        <div className="sub">Pertama masuk CRM</div>
+                        <div className="sub">First touch</div>
                       </td>
 
                       <td style={{ minWidth: 125 }}>
