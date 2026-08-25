@@ -3,13 +3,20 @@ import { supabaseAdmin } from "@/lib/supabase-admin";
 import { sendMessagingConversion } from "@/lib/meta-capi";
 
 const ALLOWED_STATUS = new Set([
+  // Funnel baru
   "Chat Builder",
-  "Tanya Aja",
-  "Qualified",
-  "Quotation Dikirim",
+  "Kebutuhan",
+  "Estimasi Dikirim",
+  "Survey",
+  "Quotation Final",
   "Hot",
   "Closing",
-  "Tidak Layak"
+  "Tidak Layak",
+
+  // Backward compatibility untuk data/status lama
+  "Tanya Aja",
+  "Qualified",
+  "Quotation Dikirim"
 ]);
 
 const ALLOWED_SOURCE = new Set([
@@ -18,9 +25,15 @@ const ALLOWED_SOURCE = new Set([
 ]);
 
 const LEAD_SIGNAL_STATUSES = new Set([
+  // Funnel baru: mulai dianggap high-intent setelah estimasi dikirim.
+  "Estimasi Dikirim",
+  "Survey",
+  "Quotation Final",
+  "Hot",
+
+  // Backward compatibility
   "Qualified",
-  "Quotation Dikirim",
-  "Hot"
+  "Quotation Dikirim"
 ]);
 
 export async function PATCH(
