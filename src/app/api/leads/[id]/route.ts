@@ -21,7 +21,9 @@ const ALLOWED_STATUS = new Set([
 
 const ALLOWED_SOURCE = new Set([
   "Meta Ads",
-  "WhatsApp Organic"
+  "WhatsApp Organic",
+  "WA Broadcast",
+  "Reaktivasi Broadcast"
 ]);
 
 const LEAD_SIGNAL_STATUSES = new Set([
