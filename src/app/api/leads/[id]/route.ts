@@ -1,12 +1,27 @@
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase-admin";
 import { sendMessagingConversion } from "@/lib/meta-capi";
-import { QUALIFIED_STATUSES, STATUSES, TOUCH_OPTIONS } from "@/lib/lead-pipeline";
 
-const ALLOWED_STATUS = new Set<string>(STATUSES as readonly string[]);
+const ALLOWED_STATUS = new Set([
+  "Chat Builder",
+  "Tanya Aja",
+  "Qualified",
+  "Quotation Dikirim",
+  "Hot",
+  "Closing",
+  "Tidak Layak"
+]);
 
-const LEAD_SIGNAL_STATUSES = QUALIFIED_STATUSES;
-const ALLOWED_TOUCH = new Set<string>(TOUCH_OPTIONS as readonly string[]);
+const ALLOWED_SOURCE = new Set([
+  "Meta Ads",
+  "WhatsApp Organic"
+]);
+
+const LEAD_SIGNAL_STATUSES = new Set([
+  "Qualified",
+  "Quotation Dikirim",
+  "Hot"
+]);
 
 export async function PATCH(
   request: Request,
@@ -63,29 +78,28 @@ export async function PATCH(
       patch.notes = String(body.notes ?? "").slice(0, 5000);
     }
 
-    if (body.closing_trigger !== undefined) {
-      patch.closing_trigger = String(body.closing_trigger ?? "").slice(0, 120) || null;
-    }
-
-    if (body.last_touch_source !== undefined) {
-      const touch = String(body.last_touch_source ?? "").trim();
-
-      if (touch && !ALLOWED_TOUCH.has(touch)) {
+    // Manual source changes from the dashboard are now actually persisted.
+    if (body.source !== undefined) {
+      if (!ALLOWED_SOURCE.has(body.source)) {
         return NextResponse.json(
-          { ok: false, error: "Invalid touch source" },
+          { ok: false, error: "Invalid source" },
           { status: 400 }
         );
       }
 
-      patch.last_touch_source = touch || null;
-      patch.last_touch_at = new Date().toISOString();
+      patch.source = body.source;
     }
 
-    if (body.is_historical !== undefined) {
-      patch.is_historical = Boolean(body.is_historical);
-      if (patch.is_historical && !existing.historical_imported_at) {
-        patch.historical_imported_at = new Date().toISOString();
-      }
+    // Source normalization:
+    // A Meta Ad ID (source_id) or ctwa_clid is authoritative evidence
+    // that this lead originated from Meta click-to-WhatsApp.
+    // This prevents old/inconsistent rows from remaining "WhatsApp Organic".
+    const hasMetaAttribution =
+      Boolean(existing.source_id) ||
+      Boolean(existing.ctwa_clid);
+
+    if (hasMetaAttribution) {
+      patch.source = "Meta Ads";
     }
 
     const { data: updated, error: updateError } = await db
@@ -108,15 +122,13 @@ export async function PATCH(
 
     const capi: Record<string, any> = {};
 
-    // Send LeadSubmitted once when the lead reaches a meaningful sales-qualified stage.
-    // We intentionally do NOT send LeadSubmitted when moving directly to Closing;
-    // Purchase is the higher-value outcome in that case.
+    // Send LeadSubmitted once when the lead reaches a meaningful
+    // sales-qualified stage and has the required CTWA identifier.
     if (
       LEAD_SIGNAL_STATUSES.has(updated.status) &&
       !updated.capi_lead_sent_at &&
       updated.source === "Meta Ads" &&
-      updated.ctwa_clid &&
-      !updated.suppress_capi
+      updated.ctwa_clid
     ) {
       const leadResult = await sendMessagingConversion(
         updated,
@@ -152,14 +164,12 @@ export async function PATCH(
     }
 
     // Purchase is sent once when Closing has a positive revenue value.
-    // If a user marks Closing first and fills revenue later, the later save will send it.
     if (
       updated.status === "Closing" &&
       Number(updated.revenue || 0) > 0 &&
       !updated.capi_purchase_sent_at &&
       updated.source === "Meta Ads" &&
-      updated.ctwa_clid &&
-      !updated.suppress_capi
+      updated.ctwa_clid
     ) {
       const purchaseResult = await sendMessagingConversion(
         updated,
@@ -197,7 +207,10 @@ export async function PATCH(
     return NextResponse.json({
       ok: true,
       lead: updated,
-      capi
+      capi,
+      source_normalized:
+        existing.source !== updated.source &&
+        updated.source === "Meta Ads"
     });
   } catch (error) {
     console.error(error);

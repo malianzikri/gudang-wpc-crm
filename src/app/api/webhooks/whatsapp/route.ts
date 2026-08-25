@@ -108,10 +108,10 @@ export async function POST(request: Request) {
           if (findError) throw findError;
 
           let leadId: string;
-          const touchSource = sourceId ? "Meta Ads" : "WhatsApp Organic";
 
-          const metaTouchPatch = sourceId
+          const attributionPatch = sourceId
             ? {
+                source: "Meta Ads",
                 source_type: referral?.source_type ?? null,
                 source_id: sourceId,
                 source_url: referral?.source_url ?? null,
@@ -139,14 +139,8 @@ export async function POST(request: Request) {
                 phone: `+${waId}`,
                 name,
                 status: "Chat Builder",
-                // First touch is set ONCE when the lead is first created.
                 source: sourceId ? "Meta Ads" : "WhatsApp Organic",
-                source_confidence: sourceId
-                  ? "live_meta_referral"
-                  : "live_organic",
-                ...metaTouchPatch,
-                last_touch_source: touchSource,
-                last_touch_at: messageTime,
+                ...attributionPatch,
                 first_message: messageText,
                 last_message: messageText,
                 first_seen_at: messageTime,
@@ -174,25 +168,26 @@ export async function POST(request: Request) {
               last_seen_at: messageTime
             };
 
-            // IMPORTANT: existing.source is sticky FIRST-TOUCH attribution.
-            // A later organic reply or a later Meta click must not rewrite it.
-            // Current marketing touch is tracked separately.
+            // Repair an inconsistent historical row immediately:
+            // if it already owns Meta attribution, it must be classified Meta Ads.
+            if (existing.source_id || existing.ctwa_clid) {
+              patch.source = "Meta Ads";
+            }
+
+            // First CTWA attribution is sticky. Later organic/ad messages do
+            // not replace the original ad click, but any incoming ad referral
+            // always makes the source Meta Ads.
             if (sourceId) {
-              patch.last_touch_source = "Meta Ads";
-              patch.last_touch_at = messageTime;
+              patch.source = "Meta Ads";
 
               if (!existing.source_id) {
-                Object.assign(patch, metaTouchPatch);
+                Object.assign(patch, attributionPatch);
               } else {
                 if (ctwaClid && !existing.ctwa_clid) {
                   patch.ctwa_clid = ctwaClid;
                 }
 
-                if (
-                  existing.source_id &&
-                  !existing.ad_name &&
-                  metaAttribution
-                ) {
+                if (!existing.ad_name && metaAttribution) {
                   Object.assign(patch, {
                     ad_name: metaAttribution.ad_name ?? null,
                     adset_id: metaAttribution.adset_id ?? null,
@@ -204,13 +199,9 @@ export async function POST(request: Request) {
                   });
                 }
               }
-
-              // A fresh CTWA click is valid current attribution, so a lead that
-              // was historical-only may participate in CAPI again from here.
-              if (ctwaClid) patch.suppress_capi = false;
-            } else if (!existing.last_touch_source) {
-              patch.last_touch_source = existing.source || "WhatsApp Organic";
-              patch.last_touch_at = messageTime;
+            } else if (ctwaClid && !existing.ctwa_clid) {
+              patch.ctwa_clid = ctwaClid;
+              patch.source = "Meta Ads";
             }
 
             const { error: updateError } = await db
