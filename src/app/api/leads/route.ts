@@ -4,7 +4,8 @@ import {
   HIGH_INTENT_STATUSES,
   SOURCE_GROUPS,
   sourceGroup,
-  normalizeLeadStatus
+  normalizeLeadStatus,
+  normalizeTouchSource
 } from "@/lib/lead-pipeline";
 
 export const runtime = "nodejs";
@@ -72,7 +73,9 @@ function buildSummary(rows: any[]) {
     const status = normalizeLeadStatus(row.status);
     const group = sourceGroup(row.source);
     const sourceStats = sourceMap.get(group);
-    const touch = String(row.last_touch_source || "").trim();
+    const touch = normalizeTouchSource(
+      row.last_touch_source || row.source || ""
+    );
 
     statusCounts[status] = (statusCounts[status] || 0) + 1;
 
@@ -184,7 +187,10 @@ export async function GET(request: Request) {
       until,
       leads: (data ?? []).map((lead: any) => ({
         ...lead,
-        status: normalizeLeadStatus(lead.status)
+        status: normalizeLeadStatus(lead.status),
+        last_touch_source: normalizeTouchSource(
+          lead.last_touch_source || lead.source || "WhatsApp Organic"
+        )
       })),
       summary: buildSummary(summaryRows ?? [])
     });

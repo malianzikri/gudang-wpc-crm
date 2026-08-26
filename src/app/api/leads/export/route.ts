@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase-admin";
+import { HIGH_INTENT_AUDIENCE_STATUSES } from "@/lib/lead-pipeline";
 
 export const runtime = "nodejs";
 
@@ -95,14 +96,10 @@ export async function GET(request: Request) {
     }
 
     if (type === "high_intent") {
-      query = query.in("status", [
-        "Foto Area Diterima",
-        "Qualified",
-        "Survey Ditawarkan",
-        "Survey Terjadwal",
-        "Quotation Final",
-        "Hot"
-      ]);
+      query = query.in(
+        "status",
+        [...HIGH_INTENT_AUDIENCE_STATUSES]
+      );
     } else if (type === "closing") {
       query = query.eq("status", "Closing");
     }

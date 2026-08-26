@@ -145,10 +145,12 @@ function dateTime(value: string) {
 }
 
 function dateInputLocal(date: Date) {
-  const y = date.getFullYear();
-  const m = String(date.getMonth() + 1).padStart(2, "0");
-  const d = String(date.getDate()).padStart(2, "0");
-  return `${y}-${m}-${d}`;
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Jakarta",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).format(date);
 }
 
 function capiLabel(lead: Lead) {
@@ -156,7 +158,7 @@ function capiLabel(lead: Lead) {
   if (lead.capi_purchase_sent_at) return "Purchase terkirim";
   if (lead.capi_lead_sent_at) return "Lead terkirim";
   if (lead.capi_last_error) return "CAPI error";
-  if (lead.source === "Meta Ads" && lead.ctwa_clid) return "Siap CAPI";
+  if (lead.ctwa_clid) return "Siap CAPI";
   if (lead.source === "Meta Ads") return "Tanpa CTWA ID";
   return "Non-Meta";
 }
@@ -378,7 +380,21 @@ export default function Dashboard() {
             json.capi.lead.reason || "cek log Meta CAPI"
           }`
         );
+      } else {
+        setNotice(
+          `Tersimpan: Touch/Trigger ${json.lead.last_touch_source || "—"} • Status ${json.lead.status}.`
+        );
       }
+
+      setDrafts((current) => ({
+        ...current,
+        [lead.id]: {
+          status: json.lead.status,
+          revenue: String(Number(json.lead.revenue || 0)),
+          last_touch_source:
+            json.lead.last_touch_source || json.lead.source || "WhatsApp Organic"
+        }
+      }));
 
       await load();
       await loadPerformanceCache();
@@ -402,6 +418,24 @@ export default function Dashboard() {
 
       if (!res.ok || !json.ok) {
         throw new Error(json.error || "Backfill gagal.");
+      }
+
+      if (json.sync_skipped) {
+        const minutes = Math.max(
+          1,
+          Math.ceil(Number(json.cooldown_remaining_seconds || 0) / 60)
+        );
+        setNotice(
+          `Sync Nama Iklan dilewati karena cooldown Meta masih aktif. Coba lagi sekitar ${minutes} menit.`
+        );
+      } else if (json.warning) {
+        setNotice(
+          `Sync Nama Iklan berhenti aman: ${json.updated ?? 0} lead diperbarui. ${json.warning}`
+        );
+      } else {
+        setNotice(
+          `Sync nama iklan selesai: ${json.updated ?? 0} lead diperbarui, ${json.skipped ?? 0} dilewati.`
+        );
       }
 
       await load();
@@ -864,8 +898,8 @@ export default function Dashboard() {
             background: "#fafafa"
           }}
         >
-          <strong>Catatan atribusi:</strong> Revenue Cohort mengikuti tanggal pertama lead masuk CRM.
-          {" "}Closing yang benar-benar terjadi pada periode ini: <strong>{performance?.closing_activity?.closing ?? 0}</strong>
+          <strong>Catatan atribusi:</strong> Revenue Cohort mengikuti tanggal pertama lead Meta Ads masuk CRM.
+          {" "}Closing Meta Ads yang benar-benar terjadi pada periode ini: <strong>{performance?.closing_activity?.closing ?? 0}</strong>
           {" "}dengan revenue <strong>{rupiah(performance?.closing_activity?.revenue ?? 0)}</strong>.
         </div>
 
@@ -1152,11 +1186,7 @@ export default function Dashboard() {
                           {lead.source}
                         </div>
 
-                        {lead.source_id && (
-                          <div className="sub">
-                            Ad ID: {lead.source_id}
-                          </div>
-                        )}
+                        <div className="sub">Sumber akuisisi pertama</div>
                       </td>
 
                       <td style={{ minWidth: 180 }}>
@@ -1179,6 +1209,9 @@ export default function Dashboard() {
                             </option>
                           ))}
                         </select>
+                        {lead.last_touch_source === "Meta Ads" && lead.source_id && (
+                          <div className="sub">Meta click terdeteksi</div>
+                        )}
                         {lead.is_historical && (
                           <div className="sub">Historical / pre-CRM</div>
                         )}
@@ -1199,14 +1232,24 @@ export default function Dashboard() {
                               <strong>Ad:</strong>{" "}
                               {lead.ad_name || "—"}
                             </div>
+                            {lead.source_id && (
+                              <div className="sub">
+                                <strong>Ad ID:</strong> {lead.source_id}
+                              </div>
+                            )}
                           </>
                         ) : (
                           <>
                             <div>{lead.ad_headline || "—"}</div>
-                            {lead.source === "Meta Ads" && (
-                              <div className="sub">
-                                Klik “Sync Nama Iklan”
-                              </div>
+                            {lead.source_id && (
+                              <>
+                                <div className="sub">
+                                  <strong>Ad ID:</strong> {lead.source_id}
+                                </div>
+                                <div className="sub">
+                                  Klik “Sync Nama Iklan”
+                                </div>
+                              </>
                             )}
                           </>
                         )}

@@ -75,6 +75,17 @@ export async function POST(request: Request) {
 
           if (!waId || !waMessageId) continue;
 
+          // Meta can retry the same webhook. Check idempotency before any
+          // Marketing API request so a retry cannot create repeated API hits.
+          const { data: duplicateMessage, error: duplicateError } = await db
+            .from("messages")
+            .select("id")
+            .eq("wa_message_id", waMessageId)
+            .maybeSingle();
+
+          if (duplicateError) throw duplicateError;
+          if (duplicateMessage) continue;
+
           const contact = contactByWaId.get(waId);
           const name = contact?.profile?.name ?? null;
           const messageText = extractMessageText(message);
@@ -89,16 +100,6 @@ export async function POST(request: Request) {
             ? String(referral.ctwa_clid)
             : null;
 
-          let metaAttribution: any = null;
-
-          if (sourceId) {
-            try {
-              metaAttribution = await fetchMetaAdAttribution(sourceId);
-            } catch (error) {
-              console.error("Meta enrichment failed:", error);
-            }
-          }
-
           const { data: existing, error: findError } = await db
             .from("leads")
             .select("*")
@@ -107,11 +108,29 @@ export async function POST(request: Request) {
 
           if (findError) throw findError;
 
-          let leadId: string;
+          // Only enrich when this lead genuinely needs Meta object names.
+          // This avoids unnecessary Marketing API calls on ordinary replies.
+          let metaAttribution: any = null;
+          const needsMetaEnrichment =
+            Boolean(sourceId) &&
+            (
+              !existing ||
+              !existing.source_id ||
+              !existing.ad_name
+            );
 
-          const attributionPatch = sourceId
+          if (sourceId && needsMetaEnrichment) {
+            try {
+              metaAttribution = await fetchMetaAdAttribution(sourceId);
+            } catch (error) {
+              console.error("Meta enrichment failed:", error);
+            }
+          }
+
+          // These fields describe the first/known Meta click attached to the
+          // lead. They do NOT decide first-touch acquisition.
+          const metaReferralPatch = sourceId
             ? {
-                source: "Meta Ads",
                 source_type: referral?.source_type ?? null,
                 source_id: sourceId,
                 source_url: referral?.source_url ?? null,
@@ -131,7 +150,11 @@ export async function POST(request: Request) {
               }
             : {};
 
+          let leadId: string;
+
           if (!existing) {
+            const initialSource = sourceId ? "Meta Ads" : "WhatsApp Organic";
+
             const { data: inserted, error: insertError } = await db
               .from("leads")
               .insert({
@@ -139,8 +162,18 @@ export async function POST(request: Request) {
                 phone: `+${waId}`,
                 name,
                 status: "Chat Builder",
-                source: sourceId ? "Meta Ads" : "WhatsApp Organic",
-                ...attributionPatch,
+
+                // FIRST TOUCH is decided once, when the lead is first created.
+                source: initialSource,
+                ...metaReferralPatch,
+
+                last_touch_source: initialSource,
+                last_touch_at: messageTime,
+                source_confidence: sourceId
+                  ? "live_meta_referral"
+                  : "live_organic",
+
+                suppress_capi: false,
                 first_message: messageText,
                 last_message: messageText,
                 first_seen_at: messageTime,
@@ -153,12 +186,21 @@ export async function POST(request: Request) {
 
             leadId = inserted.id;
 
-            await db.from("lead_status_events").insert({
-              lead_id: leadId,
-              old_status: null,
-              new_status: "Chat Builder",
-              revenue: 0
-            });
+            const { error: initialStatusError } = await db
+              .from("lead_status_events")
+              .insert({
+                lead_id: leadId,
+                old_status: null,
+                new_status: "Chat Builder",
+                revenue: 0
+              });
+
+            if (initialStatusError) {
+              console.error(
+                "Initial lead_status_events insert failed:",
+                initialStatusError
+              );
+            }
           } else {
             leadId = existing.id;
 
@@ -168,20 +210,27 @@ export async function POST(request: Request) {
               last_seen_at: messageTime
             };
 
-            // Repair an inconsistent historical row immediately:
-            // if it already owns Meta attribution, it must be classified Meta Ads.
-            if (existing.source_id || existing.ctwa_clid) {
-              patch.source = "Meta Ads";
+            // A normal inbound reply never overwrites a manual Broadcast /
+            // Follow-up touch. Only initialize an empty touch.
+            if (!existing.last_touch_source) {
+              patch.last_touch_source =
+                existing.source || "WhatsApp Organic";
+              patch.last_touch_at =
+                existing.last_touch_at || messageTime;
             }
 
-            // First CTWA attribution is sticky. Later organic/ad messages do
-            // not replace the original ad click, but any incoming ad referral
-            // always makes the source Meta Ads.
+            // IMPORTANT:
+            // `source` is sticky first-touch acquisition and is NOT changed.
+            // Example: Organic first touch -> later Meta ad click:
+            // source stays Organic; last_touch_source becomes Meta Ads.
             if (sourceId) {
-              patch.source = "Meta Ads";
+              patch.last_touch_source = "Meta Ads";
+              patch.last_touch_at = messageTime;
 
+              // Keep the first known Meta click details. A later ad click does
+              // not overwrite previously stored paid attribution fields.
               if (!existing.source_id) {
-                Object.assign(patch, attributionPatch);
+                Object.assign(patch, metaReferralPatch);
               } else {
                 if (ctwaClid && !existing.ctwa_clid) {
                   patch.ctwa_clid = ctwaClid;
@@ -199,9 +248,25 @@ export async function POST(request: Request) {
                   });
                 }
               }
+
+              // A real live CTWA click makes historical/imported leads eligible
+              // for future CAPI events without rewriting first-touch source.
+              if (ctwaClid) {
+                patch.suppress_capi = false;
+
+                if (existing.is_historical) {
+                  patch.source_confidence = "historical_live_ctwa";
+                }
+              }
             } else if (ctwaClid && !existing.ctwa_clid) {
               patch.ctwa_clid = ctwaClid;
-              patch.source = "Meta Ads";
+              patch.last_touch_source = "Meta Ads";
+              patch.last_touch_at = messageTime;
+              patch.suppress_capi = false;
+
+              if (existing.is_historical) {
+                patch.source_confidence = "historical_live_ctwa";
+              }
             }
 
             const { error: updateError } = await db

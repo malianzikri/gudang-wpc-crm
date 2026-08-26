@@ -43,6 +43,7 @@ type CacheRow = {
   insight_rows: any[] | null;
   synced_at: string;
   last_error: string | null;
+  updated_at: string;
 };
 
 function num(value: any) {
@@ -55,13 +56,22 @@ function isoDate(value: string | null, fallback: string) {
   return /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : fallback;
 }
 
+function jakartaDateString(date: Date) {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Jakarta",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).format(date);
+}
+
 function getRange(request: Request) {
   const url = new URL(request.url);
-  const today = new Date().toISOString().slice(0, 10);
+  const now = new Date();
+  const today = jakartaDateString(now);
 
-  const defaultSinceDate = new Date();
-  defaultSinceDate.setUTCDate(defaultSinceDate.getUTCDate() - 6);
-  const defaultSince = defaultSinceDate.toISOString().slice(0, 10);
+  const defaultSinceDate = new Date(now.getTime() - 6 * 24 * 60 * 60 * 1000);
+  const defaultSince = jakartaDateString(defaultSinceDate);
 
   return {
     since: isoDate(url.searchParams.get("since"), defaultSince),
@@ -133,7 +143,7 @@ async function readCache(db: any, since: string, until: string) {
   const { data, error } = await db
     .from("meta_performance_cache")
     .select(
-      "cache_key,since_date,until_date,ad_account_id,insight_rows,synced_at,last_error"
+      "cache_key,since_date,until_date,ad_account_id,insight_rows,synced_at,last_error,updated_at"
     )
     .eq("cache_key", cacheKey(since, until))
     .maybeSingle();
@@ -142,21 +152,41 @@ async function readCache(db: any, since: string, until: string) {
   return (data ?? null) as CacheRow | null;
 }
 
-function cacheTiming(cache: CacheRow | null) {
-  if (!cache?.synced_at) {
+async function readLatestAttempt(db: any) {
+  const { data, error } = await db
+    .from("meta_performance_cache")
+    .select("updated_at")
+    .order("updated_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) throw error;
+  return data?.updated_at ? String(data.updated_at) : null;
+}
+
+function cacheTiming(
+  cache: CacheRow | null,
+  cooldownBaseAt?: string | null
+) {
+  const attemptAt =
+    cooldownBaseAt ?? cache?.updated_at ?? cache?.synced_at ?? null;
+
+  if (!attemptAt) {
     return {
-      last_synced_at: null,
+      last_synced_at: cache?.synced_at ?? null,
+      last_attempt_at: null,
       can_sync_at: null,
       cooldown_remaining_seconds: 0
     };
   }
 
-  const syncedMs = new Date(cache.synced_at).getTime();
-  const canSyncMs = syncedMs + COOLDOWN_MS;
+  const attemptMs = new Date(attemptAt).getTime();
+  const canSyncMs = attemptMs + COOLDOWN_MS;
   const remaining = Math.max(0, Math.ceil((canSyncMs - Date.now()) / 1000));
 
   return {
-    last_synced_at: cache.synced_at,
+    last_synced_at: cache?.synced_at ?? null,
+    last_attempt_at: attemptAt,
     can_sync_at: new Date(canSyncMs).toISOString(),
     cooldown_remaining_seconds: remaining
   };
@@ -174,6 +204,7 @@ async function buildPerformanceResponse(
     sync_skipped?: boolean;
     sync_error?: string | null;
     ad_account_id?: string | null;
+    cooldown_base_at?: string | null;
   } = {}
 ) {
   const { data: leads, error: leadsError } = await db
@@ -238,21 +269,26 @@ async function buildPerformanceResponse(
       if (byName) adId = byName[0];
     }
 
-    if (adId) {
-      if (!adMap.has(adId)) {
-        adMap.set(adId, {
-          id: adId,
-          ad_name: lead.ad_name ?? "Lead tanpa insight spend",
-          adset_id: lead.adset_id,
-          adset_name: lead.adset_name ?? "Tanpa Ad Set",
-          campaign_id: lead.campaign_id,
-          campaign_name: lead.campaign_name ?? "Tanpa Campaign",
-          metrics: emptyMetrics()
-        });
-      }
-
-      addLeadToMetrics(adMap.get(adId).metrics, lead);
+    if (!adId) {
+      adId = "unattributed";
     }
+
+    if (!adMap.has(adId)) {
+      adMap.set(adId, {
+        id: adId,
+        ad_name:
+          adId === "unattributed"
+            ? "Meta Ads · Belum terpetakan Ad"
+            : lead.ad_name ?? "Lead tanpa insight spend",
+        adset_id: lead.adset_id,
+        adset_name: lead.adset_name ?? "Tanpa Ad Set",
+        campaign_id: lead.campaign_id,
+        campaign_name: lead.campaign_name ?? "Tanpa Campaign",
+        metrics: emptyMetrics()
+      });
+    }
+
+    addLeadToMetrics(adMap.get(adId).metrics, lead);
 
     let campaignId = String(lead.campaign_id ?? "");
 
@@ -269,17 +305,22 @@ async function buildPerformanceResponse(
       campaignId = `name:${lead.campaign_name}`;
     }
 
-    if (campaignId) {
-      if (!campaignMap.has(campaignId)) {
-        campaignMap.set(campaignId, {
-          id: campaignId,
-          campaign_name: lead.campaign_name ?? "Tanpa Campaign",
-          metrics: emptyMetrics()
-        });
-      }
-
-      addLeadToMetrics(campaignMap.get(campaignId).metrics, lead);
+    if (!campaignId) {
+      campaignId = "unattributed";
     }
+
+    if (!campaignMap.has(campaignId)) {
+      campaignMap.set(campaignId, {
+        id: campaignId,
+        campaign_name:
+          campaignId === "unattributed"
+            ? "Meta Ads · Belum terpetakan Campaign"
+            : lead.campaign_name ?? "Tanpa Campaign",
+        metrics: emptyMetrics()
+      });
+    }
+
+    addLeadToMetrics(campaignMap.get(campaignId).metrics, lead);
   }
 
   const campaigns = [...campaignMap.values()]
@@ -316,6 +357,7 @@ async function buildPerformanceResponse(
   const { data: closingRows, error: closingError } = await db
     .from("leads")
     .select("status,revenue,closed_at")
+    .eq("source", "Meta Ads")
     .eq("status", "Closing")
     .gte("closed_at", startOfDayJakarta(since))
     .lte("closed_at", endOfDayJakarta(until))
@@ -341,7 +383,7 @@ async function buildPerformanceResponse(
     closing_activity: closingActivity,
     campaigns,
     ads,
-    ...cacheTiming(meta.cache ?? null),
+    ...cacheTiming(meta.cache ?? null, meta.cooldown_base_at),
     stale: Boolean(meta.stale),
     sync_skipped: Boolean(meta.sync_skipped),
     sync_error: meta.sync_error ?? null,
@@ -356,10 +398,13 @@ export async function GET(request: Request) {
     const { since, until } = getRange(request);
     const db = supabaseAdmin();
     const cache = await readCache(db, since, until);
+    const latestAttemptAt = await readLatestAttempt(db);
 
     const warning = cache
       ? cache.last_error
-        ? `Sync Meta terakhir gagal. Menampilkan cache terakhir yang berhasil.`
+        ? (cache.insight_rows ?? []).length > 0
+          ? "Sync Meta terakhir gagal. Menampilkan cache terakhir yang berhasil."
+          : "Sync Meta terakhir gagal dan belum ada cache sukses untuk periode ini."
         : undefined
       : "Belum ada cache performa untuk periode ini. Klik “Sync Performa Meta” jika ingin mengambil data Meta.";
 
@@ -372,7 +417,8 @@ export async function GET(request: Request) {
         {
           cache,
           warning,
-          stale: Boolean(cache?.last_error)
+          stale: Boolean(cache?.last_error),
+          cooldown_base_at: latestAttemptAt
         }
       )
     );
@@ -399,22 +445,21 @@ export async function POST(request: Request) {
 
   try {
     const cache = await readCache(db, since, until);
-    const timing = cacheTiming(cache);
+    const latestAttemptAt = await readLatestAttempt(db);
+    const timing = cacheTiming(cache, latestAttemptAt);
 
-    if (
-      cache &&
-      timing.cooldown_remaining_seconds > 0
-    ) {
+    if (timing.cooldown_remaining_seconds > 0) {
       return NextResponse.json(
         await buildPerformanceResponse(
           db,
           since,
           until,
-          cache.insight_rows ?? [],
+          cache?.insight_rows ?? [],
           {
             cache,
             sync_skipped: true,
-            warning: `Cooldown aktif. Data Meta tidak dipanggil ulang untuk mencegah request berlebihan.`
+            cooldown_base_at: latestAttemptAt,
+            warning: `Cooldown global 15 menit aktif. Data Meta tidak dipanggil ulang untuk mencegah request berlebihan.`
           }
         )
       );
@@ -423,7 +468,6 @@ export async function POST(request: Request) {
     const { data: anchorLead, error: anchorError } = await db
       .from("leads")
       .select("source_id")
-      .eq("source", "Meta Ads")
       .not("source_id", "is", null)
       .order("first_seen_at", { ascending: false })
       .limit(1)
@@ -474,7 +518,8 @@ export async function POST(request: Request) {
           insightRows,
           {
             cache: refreshedCache,
-            ad_account_id: accountId
+            ad_account_id: accountId,
+            cooldown_base_at: now
           }
         )
       );
@@ -492,9 +537,11 @@ export async function POST(request: Request) {
           })
           .eq("cache_key", cache.cache_key);
 
+        const failedAt = new Date().toISOString();
         const failedCache = {
           ...cache,
-          last_error: message
+          last_error: message,
+          updated_at: failedAt
         };
 
         return NextResponse.json(
@@ -507,6 +554,7 @@ export async function POST(request: Request) {
               cache: failedCache,
               stale: true,
               sync_error: message,
+              cooldown_base_at: failedAt,
               warning:
                 "Meta sedang menolak/membatasi request. Data terakhir yang berhasil tetap ditampilkan; CRM dan CAPI tidak terganggu."
             }
@@ -514,14 +562,33 @@ export async function POST(request: Request) {
         );
       }
 
-      // Even without a cache, don't break the whole CRM dashboard.
+      // Even without a successful cache, record the failed attempt so repeated
+      // clicks cannot hammer Meta. The empty cache keeps the CRM usable.
+      const failedAt = new Date().toISOString();
+      await db.from("meta_performance_cache").upsert(
+        {
+          cache_key: cacheKey(since, until),
+          since_date: since,
+          until_date: until,
+          ad_account_id: null,
+          insight_rows: [],
+          synced_at: failedAt,
+          last_error: message,
+          updated_at: failedAt
+        },
+        { onConflict: "cache_key" }
+      );
+
+      const failedCache = await readCache(db, since, until);
+
       return NextResponse.json(
         await buildPerformanceResponse(db, since, until, [], {
-          cache: null,
+          cache: failedCache,
           stale: true,
           sync_error: message,
+          cooldown_base_at: failedAt,
           warning:
-            "Meta sedang menolak/membatasi request dan belum ada cache untuk periode ini. CRM tetap berjalan; coba sync lagi nanti."
+            "Meta sedang menolak/membatasi request dan belum ada cache sukses untuk periode ini. CRM tetap berjalan; sync dikunci 15 menit sebelum boleh dicoba lagi."
         })
       );
     }

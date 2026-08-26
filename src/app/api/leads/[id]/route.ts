@@ -1,42 +1,16 @@
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase-admin";
 import { sendMessagingConversion } from "@/lib/meta-capi";
+import {
+  ESTIMATE_STATUSES,
+  STATUSES,
+  TOUCH_OPTIONS,
+  normalizeLeadStatus,
+  normalizeTouchSource
+} from "@/lib/lead-pipeline";
 
-const ALLOWED_STATUS = new Set([
-  // Funnel baru
-  "Chat Builder",
-  "Kebutuhan",
-  "Estimasi Dikirim",
-  "Survey",
-  "Quotation Final",
-  "Hot",
-  "Closing",
-  "Tidak Layak",
-
-  // Backward compatibility untuk data/status lama
-  "Tanya Aja",
-  "Qualified",
-  "Quotation Dikirim"
-]);
-
-const ALLOWED_SOURCE = new Set([
-  "Meta Ads",
-  "WhatsApp Organic",
-  "WA Broadcast",
-  "Reaktivasi Broadcast"
-]);
-
-const LEAD_SIGNAL_STATUSES = new Set([
-  // Funnel baru: mulai dianggap high-intent setelah estimasi dikirim.
-  "Estimasi Dikirim",
-  "Survey",
-  "Quotation Final",
-  "Hot",
-
-  // Backward compatibility
-  "Qualified",
-  "Quotation Dikirim"
-]);
+const ALLOWED_STATUS = new Set<string>(STATUSES);
+const ALLOWED_TOUCH = new Set<string>(TOUCH_OPTIONS);
 
 export async function PATCH(
   request: Request,
@@ -58,34 +32,44 @@ export async function PATCH(
     const patch: Record<string, any> = {};
 
     if (body.status !== undefined) {
-      if (!ALLOWED_STATUS.has(body.status)) {
+      const requestedStatus = normalizeLeadStatus(String(body.status));
+
+      if (!ALLOWED_STATUS.has(requestedStatus)) {
         return NextResponse.json(
           { ok: false, error: `Invalid status: ${body.status}` },
           { status: 400 }
         );
       }
 
-      patch.status = body.status;
+      patch.status = requestedStatus;
 
-      if (body.status === "Closing" && existing.status !== "Closing") {
+      if (requestedStatus === "Closing" && existing.status !== "Closing") {
         patch.closed_at = new Date().toISOString();
       } else if (
-        body.status !== "Closing" &&
+        requestedStatus !== "Closing" &&
         existing.status === "Closing"
       ) {
         patch.closed_at = null;
       }
     }
 
-    if (body.source !== undefined) {
-      if (!ALLOWED_SOURCE.has(body.source)) {
+    if (body.last_touch_source !== undefined) {
+      const requestedTouch = normalizeTouchSource(
+        String(body.last_touch_source || "")
+      );
+
+      if (!ALLOWED_TOUCH.has(requestedTouch)) {
         return NextResponse.json(
-          { ok: false, error: `Invalid source: ${body.source}` },
+          { ok: false, error: `Invalid touch/trigger: ${requestedTouch}` },
           { status: 400 }
         );
       }
 
-      patch.source = body.source;
+      patch.last_touch_source = requestedTouch;
+
+      if (requestedTouch !== String(existing.last_touch_source || "")) {
+        patch.last_touch_at = new Date().toISOString();
+      }
     }
 
     if (body.revenue !== undefined) {
@@ -105,11 +89,23 @@ export async function PATCH(
       patch.notes = String(body.notes ?? "").slice(0, 5000);
     }
 
-    // Attribution is authoritative:
-    // once an actual Meta Ad ID or CTWA click ID exists, this cannot be
-    // classified as WhatsApp Organic.
-    if (existing.source_id || existing.ctwa_clid) {
-      patch.source = "Meta Ads";
+    // Keep `source` as first-touch acquisition. Touch/trigger is stored
+    // separately in `last_touch_source`, so changing Broadcast/Follow-up
+    // never steals first-touch credit from Meta Ads or Organic.
+
+    const nextStatus = patch.status ?? normalizeLeadStatus(existing.status);
+    const nextTouch =
+      patch.last_touch_source ??
+      existing.last_touch_source ??
+      existing.source ??
+      null;
+
+    if (
+      nextStatus === "Closing" &&
+      existing.status !== "Closing" &&
+      nextTouch
+    ) {
+      patch.closing_trigger = nextTouch;
     }
 
     if (Object.keys(patch).length === 0) {
@@ -128,22 +124,19 @@ export async function PATCH(
 
     if (updateError) throw updateError;
 
-    // Verify what Supabase actually persisted before telling the UI "success".
-    if (
-      patch.status !== undefined &&
-      updated.status !== patch.status
-    ) {
+    // Verify what Supabase actually persisted before telling the UI success.
+    if (patch.status !== undefined && updated.status !== patch.status) {
       throw new Error(
         `Status tidak tersimpan. Requested=${patch.status}, DB=${updated.status}`
       );
     }
 
     if (
-      patch.source !== undefined &&
-      updated.source !== patch.source
+      patch.last_touch_source !== undefined &&
+      updated.last_touch_source !== patch.last_touch_source
     ) {
       throw new Error(
-        `Source tidak tersimpan. Requested=${patch.source}, DB=${updated.source}`
+        `Touch/Trigger tidak tersimpan. Requested=${patch.last_touch_source}, DB=${updated.last_touch_source}`
       );
     }
 
@@ -156,10 +149,7 @@ export async function PATCH(
       );
     }
 
-    if (
-      patch.status !== undefined &&
-      patch.status !== existing.status
-    ) {
+    if (patch.status !== undefined && patch.status !== existing.status) {
       const { error: eventError } = await db
         .from("lead_status_events")
         .insert({
@@ -169,20 +159,23 @@ export async function PATCH(
           revenue: updated.revenue ?? 0
         });
 
-      // Status itself has already been saved; an audit-log problem must not
-      // make the user think the lead update failed.
+      // The CRM update has already succeeded; audit logging must not make
+      // the user think the lead itself failed to save.
       if (eventError) {
         console.error("lead_status_events insert failed:", eventError);
       }
     }
 
     const capi: Record<string, any> = {};
+    const capiAllowed = !updated.suppress_capi && Boolean(updated.ctwa_clid);
 
+    // Preserve the previous behavior: a lead may be reported once it reaches
+    // Estimasi or any later funnel stage. ESTIMATE_STATUSES is shared with the
+    // dashboard so API and UI cannot drift apart again.
     if (
-      LEAD_SIGNAL_STATUSES.has(updated.status) &&
+      ESTIMATE_STATUSES.has(normalizeLeadStatus(updated.status)) &&
       !updated.capi_lead_sent_at &&
-      updated.source === "Meta Ads" &&
-      updated.ctwa_clid
+      capiAllowed
     ) {
       try {
         const leadResult = await sendMessagingConversion(
@@ -218,8 +211,6 @@ export async function PATCH(
             leadResult.reason ?? "LeadSubmitted failed";
         }
       } catch (capiError: any) {
-        // Never roll back / hide a successfully saved CRM status because
-        // Meta CAPI happened to be unavailable.
         capi.lead = {
           ok: false,
           reason:
@@ -230,11 +221,10 @@ export async function PATCH(
     }
 
     if (
-      updated.status === "Closing" &&
+      normalizeLeadStatus(updated.status) === "Closing" &&
       Number(updated.revenue || 0) > 0 &&
       !updated.capi_purchase_sent_at &&
-      updated.source === "Meta Ads" &&
-      updated.ctwa_clid
+      capiAllowed
     ) {
       try {
         const purchaseResult = await sendMessagingConversion(
@@ -285,6 +275,7 @@ export async function PATCH(
       capi,
       saved: {
         source: updated.source,
+        last_touch_source: updated.last_touch_source,
         status: updated.status,
         revenue: Number(updated.revenue || 0)
       }
@@ -295,9 +286,7 @@ export async function PATCH(
     return NextResponse.json(
       {
         ok: false,
-        error:
-          error?.message ||
-          "Failed to update lead"
+        error: error?.message || "Failed to update lead"
       },
       { status: 500 }
     );

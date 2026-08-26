@@ -10,7 +10,7 @@ function unauthorized() {
 export function middleware(request: NextRequest) {
   const path = request.nextUrl.pathname;
 
-  // Public routes: Meta webhook + public policy pages.
+  // Public routes required by Meta plus public policy pages.
   if (
     path.startsWith("/api/webhooks/whatsapp") ||
     path.startsWith("/api/health") ||
@@ -25,7 +25,18 @@ export function middleware(request: NextRequest) {
   const user = process.env.DASHBOARD_USER;
   const pass = process.env.DASHBOARD_PASSWORD;
 
-  if (!user || !pass) return NextResponse.next();
+  // Development may run without Basic Auth. Production deliberately fails
+  // closed so a missing env cannot expose CRM customer data.
+  if (!user || !pass) {
+    if (process.env.NODE_ENV === "production") {
+      return new NextResponse(
+        "Dashboard authentication is not configured.",
+        { status: 503 }
+      );
+    }
+
+    return NextResponse.next();
+  }
 
   const auth = request.headers.get("authorization");
   if (!auth?.startsWith("Basic ")) return unauthorized();
