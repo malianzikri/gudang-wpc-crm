@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import { HIGH_INTENT_STATUSES, STATUSES, TOUCH_OPTIONS, PRODUCTS, INTENTS, FOLLOW_UP_REASONS, statusRank, statusLabel, suggestedNextAction } from "@/lib/lead-pipeline";
 
 type Lead = {
@@ -173,6 +173,55 @@ function capiLabel(lead: Lead) {
   return "Non-Meta";
 }
 
+function autoLeadScore(status: string, draft: { product_interest?: string; intent?: string; project_size?: string; project_location?: string }) {
+  const baseline: Record<string, number> = {
+    "Chat Builder": 10,
+    "Tanya Kebutuhan": 25,
+    "Foto Area Diterima": 45,
+    "Qualified": 55,
+    "Estimasi Dikirim": 70,
+    "Survey Ditawarkan": 78,
+    "Survey Terjadwal": 84,
+    "Quotation Final": 82,
+    "Hot": 90,
+    "Closing": 100,
+    "Pending": 35,
+    "No Response": 15,
+    "Lost": 0,
+    "Tidak Layak": 0
+  };
+  let score = baseline[normalizeStatusForScore(status)] ?? 0;
+  if (draft.project_size) score += 10;
+  if (draft.project_location) score += 5;
+  if (draft.product_interest) score += 5;
+  if (draft.intent === "Material + Pasang") score += 10;
+  else if (draft.intent === "Hitung Kebutuhan") score += 8;
+  else if (draft.intent === "Jasa Pasang" || draft.intent === "Survey") score += 6;
+  return Math.min(100, score);
+}
+
+function normalizeStatusForScore(status: string) {
+  if (status === "Tanya Aja") return "Tanya Kebutuhan";
+  if (status === "Estimasi Harga") return "Estimasi Dikirim";
+  return status;
+}
+
+function followUpLabel(value: string | null | undefined, nowMs: number) {
+  if (!value) return { text: "+ Jadwalkan FU", overdue: false };
+  const date = new Date(value);
+  const diff = date.getTime() - nowMs;
+  const absHours = Math.max(1, Math.round(Math.abs(diff) / 3600000));
+  const now = new Date(nowMs);
+  const sameDate = date.toLocaleDateString("en-CA", { timeZone: "Asia/Jakarta" }) === now.toLocaleDateString("en-CA", { timeZone: "Asia/Jakarta" });
+  const tomorrow = new Date(nowMs); tomorrow.setDate(tomorrow.getDate() + 1);
+  const isTomorrow = date.toLocaleDateString("en-CA", { timeZone: "Asia/Jakarta" }) === tomorrow.toLocaleDateString("en-CA", { timeZone: "Asia/Jakarta" });
+  const time = new Intl.DateTimeFormat("id-ID", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Jakarta" }).format(date);
+  if (diff < 0) return { text: `OVERDUE ${absHours} jam`, overdue: true };
+  if (sameDate) return { text: `Hari ini ${time}`, overdue: false };
+  if (isTomorrow) return { text: `Besok ${time}`, overdue: false };
+  return { text: dateTime(value), overdue: false };
+}
+
 export default function Dashboard() {
   const today = useMemo(() => new Date(), []);
   const sevenDaysAgo = useMemo(() => {
@@ -199,6 +248,8 @@ export default function Dashboard() {
   const [audienceType, setAudienceType] = useState<
     "all" | "high_intent" | "closing"
   >("all");
+  const [quickFilter, setQuickFilter] = useState<"" | "hot" | "estimate" | "qualified" | "ask" | "builder" | "overdue">("");
+  const [expandedRows, setExpandedRows] = useState<Record<string, boolean>>({});
 
   const [since, setSince] = useState(dateInputLocal(sevenDaysAgo));
   const [until, setUntil] = useState(dateInputLocal(today));
@@ -380,7 +431,7 @@ export default function Dashboard() {
           estimated_value: Number(draft.estimated_value || 0),
           next_follow_up_at: draft.next_follow_up_at || null,
           follow_up_reason: draft.follow_up_reason,
-          lead_score: Number(draft.lead_score || 0)
+          lead_score: autoLeadScore(draft.status, draft)
         })
       });
 
@@ -555,7 +606,16 @@ export default function Dashboard() {
   const statusCounts = summary.statusCounts ?? {};
 
   const sortedLeads = useMemo(() => {
-    const copy = [...leads];
+    const copy = leads.filter((lead) => {
+      if (!quickFilter) return true;
+      if (quickFilter === "hot") return lead.status === "Hot";
+      if (quickFilter === "estimate") return lead.status === "Estimasi Dikirim";
+      if (quickFilter === "qualified") return ["Foto Area Diterima", "Qualified"].includes(lead.status);
+      if (quickFilter === "ask") return lead.status === "Tanya Kebutuhan";
+      if (quickFilter === "builder") return lead.status === "Chat Builder";
+      if (quickFilter === "overdue") return Boolean(lead.next_follow_up_at && new Date(lead.next_follow_up_at).getTime() < nowMs && !["Closing", "Lost", "Tidak Layak"].includes(lead.status));
+      return true;
+    });
 
     const valueFor = (lead: Lead) => {
       if (sortKey === "name") return String(lead.name || lead.phone || lead.wa_id || "").toLowerCase();
@@ -582,7 +642,7 @@ export default function Dashboard() {
     });
 
     return copy;
-  }, [leads, sortKey, sortDirection]);
+  }, [leads, sortKey, sortDirection, quickFilter, nowMs]);
 
   function toggleSort(nextKey: SortKey) {
     if (sortKey === nextKey) {
@@ -662,52 +722,19 @@ export default function Dashboard() {
         </div>
       )}
 
-      <section className="cards">
-        <div className="card">
-          <div className="label">Total lead</div>
-          <div className="value">{summary.total}</div>
-        </div>
-
-        <div className="card">
-          <div className="label">Meta Ads</div>
-          <div className="value">{summary.sourceTotals?.meta ?? 0}</div>
-        </div>
-
-        <div className="card">
-          <div className="label">Organic</div>
-          <div className="value">{summary.sourceTotals?.organic ?? 0}</div>
-        </div>
-
-        <div className="card">
-          <div className="label">Belum Teratribusi</div>
-          <div className="value">{summary.sourceTotals?.legacy ?? 0}</div>
-        </div>
-
-        <div className="card">
-          <div className="label">Reaktivasi Broadcast</div>
-          <div className="value">{summary.broadcastReactivation ?? 0}</div>
-        </div>
-
-        <div className="card">
-          <div className="label">High Intent</div>
-          <div className="value">{summary.highIntent}</div>
-        </div>
-
-        <div className="card">
-          <div className="label">Sedang Tahap Survey</div>
-          <div className="value">{summary.survey}</div>
-        </div>
-
-        <div className="card">
-          <div className="label">Closing</div>
-          <div className="value">{summary.closing}</div>
-        </div>
-
-        <div className="card">
-          <div className="label">Revenue Closing</div>
-          <div className="value">{rupiah(summary.revenue)}</div>
-        </div>
+      <section className="headline-cards">
+        <div className="headline-card"><div className="label">Total Lead</div><div className="value">{summary.total}</div></div>
+        <div className="headline-card"><div className="label">High Intent</div><div className="value">{summary.highIntent}</div></div>
+        <div className="headline-card"><div className="label">Closing</div><div className="value">{summary.closing}</div></div>
+        <div className="headline-card"><div className="label">Revenue Closing</div><div className="value">{rupiah(summary.revenue)}</div></div>
       </section>
+      <div className="attribution-strip">
+        <span><b>Meta</b> {summary.sourceTotals?.meta ?? 0}</span>
+        <span><b>Organic</b> {summary.sourceTotals?.organic ?? 0}</span>
+        <span><b>Unattributed</b> {summary.sourceTotals?.legacy ?? 0}</span>
+        <span><b>Reaktivasi</b> {summary.broadcastReactivation ?? 0}</span>
+        <span><b>Survey</b> {summary.survey}</span>
+      </div>
 
       <section className="card" style={{ marginBottom: 18, padding: 0, overflow: "hidden" }}>
         <div style={{ padding: "16px 18px 10px" }}>
@@ -891,7 +918,7 @@ export default function Dashboard() {
         <div
           style={{
             display: "grid",
-            gridTemplateColumns: "repeat(8, minmax(130px, 1fr))",
+            gridTemplateColumns: "repeat(10, minmax(130px, 1fr))",
             gap: 10,
             marginBottom: 16,
             overflowX: "auto"
@@ -903,8 +930,10 @@ export default function Dashboard() {
             ["Estimasi", compactNumber(performance?.summary?.estimate ?? 0)],
             ["Qualified", compactNumber(performance?.summary?.qualified ?? 0)],
             ["Survey", compactNumber(performance?.summary?.survey ?? 0)],
-            ["Closing", compactNumber(performance?.summary?.closing ?? 0)],
+            ["Closing Cohort", compactNumber(performance?.summary?.closing ?? 0)],
             ["Revenue Cohort", rupiah(performance?.summary?.revenue ?? 0)],
+            ["Closing Aktual", compactNumber(performance?.closing_activity?.closing ?? 0)],
+            ["Revenue Aktual", rupiah(performance?.closing_activity?.revenue ?? 0)],
             ["ROAS Cohort", roas(performance?.summary?.roas ?? 0)]
           ].map(([label, value]) => (
             <div
@@ -1077,12 +1106,12 @@ export default function Dashboard() {
             <div className="sub">Prioritas kerja sales. Follow-up yang lewat jadwal ditandai overdue di tabel.</div>
           </div>
           <div className="action-cards">
-            <div><b>{leads.filter(l => l.status === "Hot").length}</b><span>Hot</span></div>
-            <div><b>{leads.filter(l => l.status === "Estimasi Dikirim").length}</b><span>Estimasi</span></div>
-            <div><b>{leads.filter(l => ["Foto Area Diterima","Qualified"].includes(l.status)).length}</b><span>Qualified</span></div>
-            <div><b>{leads.filter(l => l.status === "Tanya Kebutuhan").length}</b><span>Tanya Aja</span></div>
-            <div><b>{leads.filter(l => l.status === "Chat Builder").length}</b><span>Builder</span></div>
-            <div><b>{leads.filter(l => l.next_follow_up_at && new Date(l.next_follow_up_at).getTime() < nowMs && !["Closing","Lost","Tidak Layak"].includes(l.status)).length}</b><span>Overdue</span></div>
+            <button className={`action-card-button ${quickFilter === "hot" ? "active" : ""}`} onClick={() => setQuickFilter(quickFilter === "hot" ? "" : "hot")}><b>{leads.filter(l => l.status === "Hot").length}</b><span>Hot</span></button>
+            <button className={`action-card-button ${quickFilter === "estimate" ? "active" : ""}`} onClick={() => setQuickFilter(quickFilter === "estimate" ? "" : "estimate")}><b>{leads.filter(l => l.status === "Estimasi Dikirim").length}</b><span>Estimasi</span></button>
+            <button className={`action-card-button ${quickFilter === "qualified" ? "active" : ""}`} onClick={() => setQuickFilter(quickFilter === "qualified" ? "" : "qualified")}><b>{leads.filter(l => ["Foto Area Diterima","Qualified"].includes(l.status)).length}</b><span>Qualified</span></button>
+            <button className={`action-card-button ${quickFilter === "ask" ? "active" : ""}`} onClick={() => setQuickFilter(quickFilter === "ask" ? "" : "ask")}><b>{leads.filter(l => l.status === "Tanya Kebutuhan").length}</b><span>Tanya Aja</span></button>
+            <button className={`action-card-button ${quickFilter === "builder" ? "active" : ""}`} onClick={() => setQuickFilter(quickFilter === "builder" ? "" : "builder")}><b>{leads.filter(l => l.status === "Chat Builder").length}</b><span>Builder</span></button>
+            <button className={`action-card-button ${quickFilter === "overdue" ? "active" : ""}`} onClick={() => setQuickFilter(quickFilter === "overdue" ? "" : "overdue")}><b>{leads.filter(l => l.next_follow_up_at && new Date(l.next_follow_up_at).getTime() < nowMs && !["Closing","Lost","Tidak Layak"].includes(l.status)).length}</b><span>Overdue</span></button>
           </div>
         </div>
       </section>
@@ -1187,255 +1216,94 @@ export default function Dashboard() {
         </button>
       </section>
 
-      <section className="panel">
-        <div className="table-wrap">
-          <table style={{ minWidth: 1780 }}>
+      <section className="panel lead-panel">
+        {quickFilter && <div className="quick-filter-banner">Filter cepat aktif: <strong>{quickFilter}</strong><button onClick={() => setQuickFilter("")}>Tampilkan semua</button></div>}
+        <div className="table-wrap lead-table-wrap">
+          <table className="lead-table">
             <thead>
               <tr>
                 <th><button className="sort-button" onClick={() => toggleSort("name")}>{sortLabel("Lead", "name")}</button></th>
-                <th><button className="sort-button" onClick={() => toggleSort("source")}>{sortLabel("First Touch", "source")}</button></th>
-                <th><button className="sort-button" onClick={() => toggleSort("touch")}>{sortLabel("Touch / Trigger", "touch")}</button></th>
-                <th><button className="sort-button" onClick={() => toggleSort("campaign")}>{sortLabel("Campaign / Ad Set / Ad", "campaign")}</button></th>
-                <th><button className="sort-button" onClick={() => toggleSort("last_message")}>{sortLabel("Pesan terakhir", "last_message")}</button></th>
-                <th><button className="sort-button" onClick={() => toggleSort("first_seen_at")}>{sortLabel("Masuk Lead", "first_seen_at")}</button></th>
-                <th><button className="sort-button" onClick={() => toggleSort("last_seen_at")}>{sortLabel("Aktivitas Terakhir", "last_seen_at")}</button></th>
+                <th><button className="sort-button" onClick={() => toggleSort("first_seen_at")}>{sortLabel("Masuk", "first_seen_at")}</button></th>
+                <th><button className="sort-button" onClick={() => toggleSort("last_seen_at")}>{sortLabel("Aktivitas", "last_seen_at")}</button></th>
                 <th><button className="sort-button" onClick={() => toggleSort("status")}>{sortLabel("Status", "status")}</button></th>
+                <th>Score</th>
+                <th>Next Action</th>
+                <th>Next FU</th>
                 <th><button className="sort-button" onClick={() => toggleSort("revenue")}>{sortLabel("Revenue", "revenue")}</button></th>
-                <th>Sales Action</th>
-                <th>Meta CAPI</th>
-                <th></th>
+                <th>CAPI</th>
+                <th>Aksi</th>
               </tr>
             </thead>
-
             <tbody>
-              {!loading &&
-                sortedLeads.map((lead) => {
-                  const draft = drafts[lead.id] ?? {
-                    status: lead.status,
-                    revenue: String(Number(lead.revenue || 0)),
-                    last_touch_source: lead.last_touch_source || lead.source || "WhatsApp Organic",
-                    product_interest: lead.product_interest || "",
-                    intent: lead.intent || "",
-                    project_size: lead.project_size || "",
-                    project_location: lead.project_location || "",
-                    estimated_value: String(Number(lead.estimated_value || 0)),
-                    next_follow_up_at: lead.next_follow_up_at ? new Date(lead.next_follow_up_at).toISOString().slice(0,16) : "",
-                    follow_up_reason: lead.follow_up_reason || "",
-                    lead_score: String(Number(lead.lead_score || 0))
-                  };
-
-                  return (
-                    <tr key={lead.id}>
+              {!loading && sortedLeads.map((lead) => {
+                const draft = drafts[lead.id] ?? {
+                  status: lead.status, revenue: String(Number(lead.revenue || 0)), last_touch_source: lead.last_touch_source || lead.source || "WhatsApp Organic",
+                  product_interest: lead.product_interest || "", intent: lead.intent || "", project_size: lead.project_size || "", project_location: lead.project_location || "",
+                  estimated_value: String(Number(lead.estimated_value || 0)), next_follow_up_at: lead.next_follow_up_at ? new Date(lead.next_follow_up_at).toISOString().slice(0,16) : "", follow_up_reason: lead.follow_up_reason || "", lead_score: String(Number(lead.lead_score || 0))
+                };
+                const score = autoLeadScore(draft.status, draft);
+                const followUp = followUpLabel(draft.next_follow_up_at || lead.next_follow_up_at, nowMs);
+                const expanded = Boolean(expandedRows[lead.id]);
+                return (
+                  <Fragment key={lead.id}>
+                    <tr className={followUp.overdue ? "lead-row overdue-row" : "lead-row"}>
+                      <td className="sticky-lead">
+                        <div className="name">{lead.name || "Tanpa nama"}</div>
+                        <div className="sub">{lead.phone || `+${lead.wa_id}`}</div>
+                        <div className="lead-source-line">{lead.source}{lead.campaign_name ? ` · ${lead.campaign_name}` : ""}</div>
+                      </td>
+                      <td><div className="compact-date">{dateTime(lead.first_seen_at)}</div></td>
+                      <td><div className="compact-date">{dateTime(lead.last_seen_at)}</div></td>
                       <td>
-                        <div className="name">
-                          {lead.name || "Tanpa nama"}
-                        </div>
-                        <div className="sub">
-                          {lead.phone || `+${lead.wa_id}`}
-                        </div>
-                      </td>
-
-                      <td>
-                        <div
-                          className={
-                            lead.source === "Meta Ads"
-                              ? "source-meta"
-                              : ""
-                          }
-                        >
-                          {lead.source}
-                        </div>
-
-                        <div className="sub">Sumber akuisisi pertama</div>
-                      </td>
-
-                      <td style={{ minWidth: 180 }}>
-                        <select
-                          className="status-select"
-                          value={draft.last_touch_source}
-                          onChange={(e) =>
-                            setDrafts((d) => ({
-                              ...d,
-                              [lead.id]: {
-                                ...draft,
-                                last_touch_source: e.target.value
-                              }
-                            }))
-                          }
-                        >
-                          {TOUCH_OPTIONS.map((touch) => (
-                            <option key={touch} value={touch}>
-                              {touch}
-                            </option>
-                          ))}
-                        </select>
-                        {lead.last_touch_source === "Meta Ads" && lead.source_id && (
-                          <div className="sub">Meta click terdeteksi</div>
-                        )}
-                        {lead.is_historical && (
-                          <div className="sub">Historical / pre-CRM</div>
-                        )}
-                      </td>
-
-                      <td style={{ minWidth: 280 }}>
-                        {(lead.campaign_name || lead.manual_campaign) ? (
-                          <>
-                            <div>
-                              <strong>Campaign:</strong>{" "}
-                              {lead.campaign_name || lead.manual_campaign}
-                            </div>
-                            <div className="sub">
-                              <strong>Ad Set:</strong>{" "}
-                              {lead.adset_name || "—"}
-                            </div>
-                            <div className="sub">
-                              <strong>Ad:</strong>{" "}
-                              {lead.ad_name || "—"}
-                            </div>
-                            {lead.source_id && (
-                              <div className="sub">
-                                <strong>Ad ID:</strong> {lead.source_id}
-                              </div>
-                            )}
-                          </>
-                        ) : (
-                          <>
-                            <div>{lead.ad_headline || "—"}</div>
-                            {lead.source_id && (
-                              <>
-                                <div className="sub">
-                                  <strong>Ad ID:</strong> {lead.source_id}
-                                </div>
-                                <div className="sub">
-                                  Klik “Sync Nama Iklan”
-                                </div>
-                              </>
-                            )}
-                          </>
-                        )}
-                      </td>
-
-                      <td>
-                        <div className="message">
-                          {lead.last_message || "—"}
-                        </div>
-                      </td>
-
-                      <td style={{ minWidth: 125 }}>
-                        <div className="name">{dateTime(lead.first_seen_at)}</div>
-                        <div className="sub">First touch</div>
-                      </td>
-
-                      <td style={{ minWidth: 125 }}>
-                        {dateTime(lead.last_seen_at)}
-                      </td>
-
-                      <td>
-                        <select
-                          className="status-select"
-                          value={draft.status}
-                          onChange={(e) =>
-                            setDrafts((d) => ({
-                              ...d,
-                              [lead.id]: {
-                                ...draft,
-                                status: e.target.value
-                              }
-                            }))
-                          }
-                        >
-                          {STATUSES.map((s) => (
-                            <option key={s} value={s}>
-                              {statusLabel(s)}
-                            </option>
-                          ))}
+                        <select className="status-select compact-select" value={draft.status} onChange={(e) => setDrafts((d) => ({...d,[lead.id]: {...draft,status:e.target.value}}))}>
+                          {STATUSES.map((x) => <option key={x} value={x}>{statusLabel(x)}</option>)}
                         </select>
                       </td>
-
-                      <td>
-                        <input
-                          className="revenue"
-                          inputMode="numeric"
-                          value={draft.revenue}
-                          onChange={(e) =>
-                            setDrafts((d) => ({
-                              ...d,
-                              [lead.id]: {
-                                ...draft,
-                                revenue:
-                                  e.target.value.replace(/[^\d]/g, "")
-                              }
-                            }))
-                          }
-                        />
-                      </td>
-
-                      <td style={{ minWidth: 330 }}>
-                        <div className="sales-action-box">
-                          <div className="next-action"><strong>Next:</strong> {suggestedNextAction(draft.status)}</div>
-                          <div className="sales-grid">
-                            <select className="mini-control" value={draft.product_interest} onChange={(e) => setDrafts((d) => ({...d,[lead.id]: {...draft, product_interest:e.target.value}}))}>
-                              <option value="">Produk</option>{PRODUCTS.map((x)=><option key={x} value={x}>{x}</option>)}
-                            </select>
-                            <select className="mini-control" value={draft.intent} onChange={(e) => setDrafts((d) => ({...d,[lead.id]: {...draft, intent:e.target.value}}))}>
-                              <option value="">Intent</option>{INTENTS.map((x)=><option key={x} value={x}>{x}</option>)}
-                            </select>
-                            <input className="mini-control" placeholder="Ukuran 3x3,5 m" value={draft.project_size} onChange={(e) => setDrafts((d) => ({...d,[lead.id]: {...draft, project_size:e.target.value}}))} />
-                            <input className="mini-control" placeholder="Lokasi proyek" value={draft.project_location} onChange={(e) => setDrafts((d) => ({...d,[lead.id]: {...draft, project_location:e.target.value}}))} />
-                            <input className="mini-control" type="datetime-local" value={draft.next_follow_up_at} onChange={(e) => setDrafts((d) => ({...d,[lead.id]: {...draft, next_follow_up_at:e.target.value}}))} />
-                            <select className="mini-control" value={draft.follow_up_reason} onChange={(e) => setDrafts((d) => ({...d,[lead.id]: {...draft, follow_up_reason:e.target.value}}))}>
-                              <option value="">Alasan FU</option>{FOLLOW_UP_REASONS.map((x)=><option key={x} value={x}>{x}</option>)}
-                            </select>
-                          </div>
-                          <div className="score-row">
-                            <span>Score</span><input className="score-input" inputMode="numeric" value={draft.lead_score} onChange={(e)=>setDrafts((d)=>({...d,[lead.id]:{...draft,lead_score:e.target.value.replace(/[^\d]/g,"")}}))}/><span>/100</span>
-                            {lead.next_follow_up_at && new Date(lead.next_follow_up_at).getTime() < Date.now() && !["Closing","Lost","Tidak Layak"].includes(lead.status) && <strong className="overdue">OVERDUE</strong>}
-                          </div>
-                        </div>
-                      </td>
-
-                      <td style={{ minWidth: 150 }}>
-                        <div
-                          className={
-                            lead.capi_purchase_sent_at ||
-                            lead.capi_lead_sent_at
-                              ? "source-meta"
-                              : ""
-                          }
-                          title={lead.capi_last_error || undefined}
-                        >
-                          {capiLabel(lead)}
-                        </div>
-
-                        {lead.capi_last_error && (
-                          <div className="sub">
-                            {lead.capi_last_error.slice(0, 90)}
-                          </div>
-                        )}
-                      </td>
-
-                      <td>
-                        <button
-                          className="save"
-                          disabled={savingId === lead.id}
-                          onClick={() => saveLead(lead)}
-                        >
-                          {savingId === lead.id
-                            ? "Simpan…"
-                            : "Simpan"}
-                        </button>
-                      </td>
+                      <td><span className={`score-badge score-${score >= 85 ? "hot" : score >= 55 ? "warm" : "low"}`}>{score}</span></td>
+                      <td><div className={`next-action compact-next status-${draft.status.replace(/\s+/g,"-").toLowerCase()}`}><strong>Next:</strong> {suggestedNextAction(draft.status)}</div></td>
+                      <td><button className={followUp.overdue ? "followup-chip overdue-chip" : "followup-chip"} onClick={() => setExpandedRows((x) => ({...x,[lead.id]:true}))}>{followUp.text}</button></td>
+                      <td><input className="revenue compact-revenue" inputMode="numeric" value={draft.revenue} onChange={(e) => setDrafts((d) => ({...d,[lead.id]: {...draft,revenue:e.target.value.replace(/[^\d]/g,"")}}))}/></td>
+                      <td><div className={lead.capi_purchase_sent_at || lead.capi_lead_sent_at ? "source-meta capi-small" : "capi-small"}>{capiLabel(lead)}</div></td>
+                      <td><div className="row-actions"><button className="detail-button" onClick={() => setExpandedRows((x) => ({...x,[lead.id]:!expanded}))}>{expanded ? "Tutup" : "Detail Sales"}</button><button className="save" disabled={savingId === lead.id} onClick={() => saveLead(lead)}>{savingId === lead.id ? "Simpan…" : "Simpan"}</button></div></td>
                     </tr>
-                  );
-                })}
+                    {expanded && (
+                      <tr className="detail-row"><td colSpan={10}>
+                        <div className="sales-detail-grid">
+                          <div className="detail-block">
+                            <div className="detail-title">Konteks Lead</div>
+                            <div className="detail-message">{lead.last_message || "Belum ada pesan terakhir."}</div>
+                            <div className="detail-meta"><b>First touch:</b> {lead.source} · <b>Touch terakhir:</b> {draft.last_touch_source}</div>
+                            <div className="detail-meta"><b>Campaign:</b> {lead.campaign_name || lead.manual_campaign || "—"}</div>
+                            <div className="detail-meta"><b>Ad Set:</b> {lead.adset_name || "—"} · <b>Ad:</b> {lead.ad_name || "—"}</div>
+                          </div>
+                          <div className="detail-block">
+                            <div className="detail-title">Kebutuhan Proyek</div>
+                            <div className="sales-grid">
+                              <select className="mini-control" value={draft.product_interest} onChange={(e) => setDrafts((d) => ({...d,[lead.id]: {...draft,product_interest:e.target.value}}))}><option value="">Produk</option>{PRODUCTS.map((x)=><option key={x} value={x}>{x}</option>)}</select>
+                              <select className="mini-control" value={draft.intent} onChange={(e) => setDrafts((d) => ({...d,[lead.id]: {...draft,intent:e.target.value}}))}><option value="">Intent</option>{INTENTS.map((x)=><option key={x} value={x}>{x}</option>)}</select>
+                              <input className="mini-control" placeholder="Ukuran 3x3,5 m" value={draft.project_size} onChange={(e) => setDrafts((d) => ({...d,[lead.id]: {...draft,project_size:e.target.value}}))}/>
+                              <input className="mini-control" placeholder="Lokasi proyek" value={draft.project_location} onChange={(e) => setDrafts((d) => ({...d,[lead.id]: {...draft,project_location:e.target.value}}))}/>
+                            </div>
+                          </div>
+                          <div className="detail-block">
+                            <div className="detail-title">Follow Up</div>
+                            <div className="sales-grid">
+                              <input className="mini-control" type="datetime-local" value={draft.next_follow_up_at} onChange={(e) => setDrafts((d) => ({...d,[lead.id]: {...draft,next_follow_up_at:e.target.value}}))}/>
+                              <select className="mini-control" value={draft.follow_up_reason} onChange={(e) => setDrafts((d) => ({...d,[lead.id]: {...draft,follow_up_reason:e.target.value}}))}><option value="">Alasan FU</option>{FOLLOW_UP_REASONS.map((x)=><option key={x} value={x}>{x}</option>)}</select>
+                              <select className="mini-control" value={draft.last_touch_source} onChange={(e) => setDrafts((d) => ({...d,[lead.id]: {...draft,last_touch_source:e.target.value}}))}>{TOUCH_OPTIONS.map((x)=><option key={x} value={x}>{x}</option>)}</select>
+                              <div className="auto-score-box"><span>Auto Score</span><strong>{score}/100</strong><small>Dihitung dari status + data kebutuhan</small></div>
+                            </div>
+                          </div>
+                        </div>
+                      </td></tr>
+                    )}
+                  </Fragment>
+                );
+              })}
             </tbody>
           </table>
         </div>
-
-        {!loading && leads.length === 0 && (
-          <div className="empty">Belum ada lead.</div>
-        )}
-
+        {!loading && sortedLeads.length === 0 && <div className="empty">Belum ada lead untuk filter ini.</div>}
         {loading && <div className="empty">Memuat lead…</div>}
       </section>
     </main>
