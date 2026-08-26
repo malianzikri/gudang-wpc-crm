@@ -428,7 +428,6 @@ export default function Dashboard() {
           intent: draft.intent,
           project_size: draft.project_size,
           project_location: draft.project_location,
-          estimated_value: Number(draft.estimated_value || 0),
           next_follow_up_at: draft.next_follow_up_at || null,
           follow_up_reason: draft.follow_up_reason,
           lead_score: autoLeadScore(draft.status, draft)
@@ -918,7 +917,7 @@ export default function Dashboard() {
         <div
           style={{
             display: "grid",
-            gridTemplateColumns: "repeat(10, minmax(130px, 1fr))",
+            gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))",
             gap: 10,
             marginBottom: 16,
             overflowX: "auto"
@@ -946,7 +945,7 @@ export default function Dashboard() {
               }}
             >
               <div className="label">{label}</div>
-              <div style={{ fontWeight: 800, fontSize: 20 }}>{value}</div>
+              <div style={{ fontWeight: 800, fontSize: 18, whiteSpace: "nowrap" }}>{value}</div>
             </div>
           ))}
         </div>
@@ -1217,7 +1216,7 @@ export default function Dashboard() {
       </section>
 
       <section className="panel lead-panel">
-        {quickFilter && <div className="quick-filter-banner">Filter cepat aktif: <strong>{quickFilter}</strong><button onClick={() => setQuickFilter("")}>Tampilkan semua</button></div>}
+        {quickFilter && <div className="quick-filter-banner">Filter cepat aktif: <strong>{{hot:"Hot",estimate:"Estimasi",qualified:"Qualified",ask:"Tanya Aja",builder:"Builder",overdue:"Overdue"}[quickFilter]}</strong><button onClick={() => setQuickFilter("")}>Tampilkan semua</button></div>}
         <div className="table-wrap lead-table-wrap">
           <table className="lead-table">
             <thead>
