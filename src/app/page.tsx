@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { HIGH_INTENT_STATUSES, STATUSES, TOUCH_OPTIONS, statusRank } from "@/lib/lead-pipeline";
+import { HIGH_INTENT_STATUSES, STATUSES, TOUCH_OPTIONS, PRODUCTS, INTENTS, FOLLOW_UP_REASONS, statusRank, statusLabel, suggestedNextAction } from "@/lib/lead-pipeline";
 
 type Lead = {
   id: string;
@@ -28,6 +28,16 @@ type Lead = {
   capi_lead_sent_at: string | null;
   capi_purchase_sent_at: string | null;
   capi_last_error: string | null;
+  product_interest: string | null;
+  intent: string | null;
+  project_size: string | null;
+  project_location: string | null;
+  estimated_value: number | string;
+  next_follow_up_at: string | null;
+  follow_up_reason: string | null;
+  pending_reason: string | null;
+  lost_reason: string | null;
+  lead_score: number;
 };
 
 type PerformanceMetrics = {
@@ -176,7 +186,7 @@ export default function Dashboard() {
   const [sortKey, setSortKey] = useState<SortKey>("last_seen_at");
   const [sortDirection, setSortDirection] = useState<"asc" | "desc">("desc");
   const [drafts, setDrafts] = useState<
-    Record<string, { status: string; revenue: string; last_touch_source: string }>
+    Record<string, { status: string; revenue: string; last_touch_source: string; product_interest: string; intent: string; project_size: string; project_location: string; estimated_value: string; next_follow_up_at: string; follow_up_reason: string; lead_score: string }>
   >({});
   const [loading, setLoading] = useState(true);
   const [savingId, setSavingId] = useState<string | null>(null);
@@ -232,14 +242,22 @@ export default function Dashboard() {
 
       const nextDrafts: Record<
         string,
-        { status: string; revenue: string; last_touch_source: string }
+        { status: string; revenue: string; last_touch_source: string; product_interest: string; intent: string; project_size: string; project_location: string; estimated_value: string; next_follow_up_at: string; follow_up_reason: string; lead_score: string }
       > = {};
 
       for (const lead of json.leads) {
         nextDrafts[lead.id] = {
           status: lead.status,
           revenue: String(Number(lead.revenue || 0)),
-          last_touch_source: lead.last_touch_source || lead.source || "WhatsApp Organic"
+          last_touch_source: lead.last_touch_source || lead.source || "WhatsApp Organic",
+          product_interest: lead.product_interest || "",
+          intent: lead.intent || "",
+          project_size: lead.project_size || "",
+          project_location: lead.project_location || "",
+          estimated_value: String(Number(lead.estimated_value || 0)),
+          next_follow_up_at: lead.next_follow_up_at ? new Date(lead.next_follow_up_at).toISOString().slice(0,16) : "",
+          follow_up_reason: lead.follow_up_reason || "",
+          lead_score: String(Number(lead.lead_score || 0))
         };
       }
 
@@ -354,7 +372,15 @@ export default function Dashboard() {
         body: JSON.stringify({
           status: draft.status,
           revenue: Number(draft.revenue || 0),
-          last_touch_source: draft.last_touch_source
+          last_touch_source: draft.last_touch_source,
+          product_interest: draft.product_interest,
+          intent: draft.intent,
+          project_size: draft.project_size,
+          project_location: draft.project_location,
+          estimated_value: Number(draft.estimated_value || 0),
+          next_follow_up_at: draft.next_follow_up_at || null,
+          follow_up_reason: draft.follow_up_reason,
+          lead_score: Number(draft.lead_score || 0)
         })
       });
 
@@ -392,7 +418,15 @@ export default function Dashboard() {
           status: json.lead.status,
           revenue: String(Number(json.lead.revenue || 0)),
           last_touch_source:
-            json.lead.last_touch_source || json.lead.source || "WhatsApp Organic"
+            json.lead.last_touch_source || json.lead.source || "WhatsApp Organic",
+          product_interest: json.lead.product_interest || "",
+          intent: json.lead.intent || "",
+          project_size: json.lead.project_size || "",
+          project_location: json.lead.project_location || "",
+          estimated_value: String(Number(json.lead.estimated_value || 0)),
+          next_follow_up_at: json.lead.next_follow_up_at ? new Date(json.lead.next_follow_up_at).toISOString().slice(0,16) : "",
+          follow_up_reason: json.lead.follow_up_reason || "",
+          lead_score: String(Number(json.lead.lead_score || 0))
         }
       }));
 
@@ -1036,6 +1070,23 @@ export default function Dashboard() {
         </div>
       </section>
 
+      <section className="card" style={{ marginBottom: 16 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
+          <div>
+            <h2 style={{ margin: 0, fontSize: 19 }}>Butuh Tindakan Hari Ini</h2>
+            <div className="sub">Prioritas kerja sales. Follow-up yang lewat jadwal ditandai overdue di tabel.</div>
+          </div>
+          <div className="action-cards">
+            <div><b>{leads.filter(l => l.status === "Hot").length}</b><span>Hot</span></div>
+            <div><b>{leads.filter(l => l.status === "Estimasi Dikirim").length}</b><span>Estimasi</span></div>
+            <div><b>{leads.filter(l => ["Foto Area Diterima","Qualified"].includes(l.status)).length}</b><span>Qualified</span></div>
+            <div><b>{leads.filter(l => l.status === "Tanya Kebutuhan").length}</b><span>Tanya Aja</span></div>
+            <div><b>{leads.filter(l => l.status === "Chat Builder").length}</b><span>Builder</span></div>
+            <div><b>{leads.filter(l => l.next_follow_up_at && new Date(l.next_follow_up_at).getTime() < nowMs && !["Closing","Lost","Tidak Layak"].includes(l.status)).length}</b><span>Overdue</span></div>
+          </div>
+        </div>
+      </section>
+
       <div
         className="sub"
         style={{
@@ -1055,7 +1106,7 @@ export default function Dashboard() {
       <div className="funnel">
         {STATUSES.map((status) => (
           <span className="pill" key={status}>
-            {status}
+            {statusLabel(status)}
             <b>{statusCounts[status] ?? 0}</b>
           </span>
         ))}
@@ -1077,7 +1128,7 @@ export default function Dashboard() {
           <option value="">Semua status</option>
           {STATUSES.map((s) => (
             <option key={s} value={s}>
-              {s}
+              {statusLabel(s)}
             </option>
           ))}
         </select>
@@ -1150,6 +1201,7 @@ export default function Dashboard() {
                 <th><button className="sort-button" onClick={() => toggleSort("last_seen_at")}>{sortLabel("Aktivitas Terakhir", "last_seen_at")}</button></th>
                 <th><button className="sort-button" onClick={() => toggleSort("status")}>{sortLabel("Status", "status")}</button></th>
                 <th><button className="sort-button" onClick={() => toggleSort("revenue")}>{sortLabel("Revenue", "revenue")}</button></th>
+                <th>Sales Action</th>
                 <th>Meta CAPI</th>
                 <th></th>
               </tr>
@@ -1161,7 +1213,15 @@ export default function Dashboard() {
                   const draft = drafts[lead.id] ?? {
                     status: lead.status,
                     revenue: String(Number(lead.revenue || 0)),
-                    last_touch_source: lead.last_touch_source || lead.source || "WhatsApp Organic"
+                    last_touch_source: lead.last_touch_source || lead.source || "WhatsApp Organic",
+                    product_interest: lead.product_interest || "",
+                    intent: lead.intent || "",
+                    project_size: lead.project_size || "",
+                    project_location: lead.project_location || "",
+                    estimated_value: String(Number(lead.estimated_value || 0)),
+                    next_follow_up_at: lead.next_follow_up_at ? new Date(lead.next_follow_up_at).toISOString().slice(0,16) : "",
+                    follow_up_reason: lead.follow_up_reason || "",
+                    lead_score: String(Number(lead.lead_score || 0))
                   };
 
                   return (
@@ -1286,7 +1346,7 @@ export default function Dashboard() {
                         >
                           {STATUSES.map((s) => (
                             <option key={s} value={s}>
-                              {s}
+                              {statusLabel(s)}
                             </option>
                           ))}
                         </select>
@@ -1308,6 +1368,30 @@ export default function Dashboard() {
                             }))
                           }
                         />
+                      </td>
+
+                      <td style={{ minWidth: 330 }}>
+                        <div className="sales-action-box">
+                          <div className="next-action"><strong>Next:</strong> {suggestedNextAction(draft.status)}</div>
+                          <div className="sales-grid">
+                            <select className="mini-control" value={draft.product_interest} onChange={(e) => setDrafts((d) => ({...d,[lead.id]: {...draft, product_interest:e.target.value}}))}>
+                              <option value="">Produk</option>{PRODUCTS.map((x)=><option key={x} value={x}>{x}</option>)}
+                            </select>
+                            <select className="mini-control" value={draft.intent} onChange={(e) => setDrafts((d) => ({...d,[lead.id]: {...draft, intent:e.target.value}}))}>
+                              <option value="">Intent</option>{INTENTS.map((x)=><option key={x} value={x}>{x}</option>)}
+                            </select>
+                            <input className="mini-control" placeholder="Ukuran 3x3,5 m" value={draft.project_size} onChange={(e) => setDrafts((d) => ({...d,[lead.id]: {...draft, project_size:e.target.value}}))} />
+                            <input className="mini-control" placeholder="Lokasi proyek" value={draft.project_location} onChange={(e) => setDrafts((d) => ({...d,[lead.id]: {...draft, project_location:e.target.value}}))} />
+                            <input className="mini-control" type="datetime-local" value={draft.next_follow_up_at} onChange={(e) => setDrafts((d) => ({...d,[lead.id]: {...draft, next_follow_up_at:e.target.value}}))} />
+                            <select className="mini-control" value={draft.follow_up_reason} onChange={(e) => setDrafts((d) => ({...d,[lead.id]: {...draft, follow_up_reason:e.target.value}}))}>
+                              <option value="">Alasan FU</option>{FOLLOW_UP_REASONS.map((x)=><option key={x} value={x}>{x}</option>)}
+                            </select>
+                          </div>
+                          <div className="score-row">
+                            <span>Score</span><input className="score-input" inputMode="numeric" value={draft.lead_score} onChange={(e)=>setDrafts((d)=>({...d,[lead.id]:{...draft,lead_score:e.target.value.replace(/[^\d]/g,"")}}))}/><span>/100</span>
+                            {lead.next_follow_up_at && new Date(lead.next_follow_up_at).getTime() < Date.now() && !["Closing","Lost","Tidak Layak"].includes(lead.status) && <strong className="overdue">OVERDUE</strong>}
+                          </div>
+                        </div>
                       </td>
 
                       <td style={{ minWidth: 150 }}>

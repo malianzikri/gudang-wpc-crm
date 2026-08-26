@@ -89,6 +89,43 @@ export async function PATCH(
       patch.notes = String(body.notes ?? "").slice(0, 5000);
     }
 
+    const stringFields = [
+      "product_interest", "intent", "project_size", "project_location",
+      "follow_up_reason", "pending_reason", "lost_reason"
+    ];
+    for (const field of stringFields) {
+      if (body[field] !== undefined) {
+        patch[field] = body[field] ? String(body[field]).slice(0, 500) : null;
+      }
+    }
+
+    if (body.estimated_value !== undefined) {
+      const value = Number(body.estimated_value || 0);
+      if (!Number.isFinite(value) || value < 0) {
+        return NextResponse.json({ ok: false, error: "Invalid estimated value" }, { status: 400 });
+      }
+      patch.estimated_value = value;
+    }
+
+    if (body.lead_score !== undefined) {
+      const score = Math.max(0, Math.min(100, Math.round(Number(body.lead_score || 0))));
+      if (!Number.isFinite(score)) {
+        return NextResponse.json({ ok: false, error: "Invalid lead score" }, { status: 400 });
+      }
+      patch.lead_score = score;
+    }
+
+    if (body.next_follow_up_at !== undefined) {
+      if (!body.next_follow_up_at) patch.next_follow_up_at = null;
+      else {
+        const parsed = new Date(String(body.next_follow_up_at));
+        if (Number.isNaN(parsed.getTime())) {
+          return NextResponse.json({ ok: false, error: "Invalid next follow up date" }, { status: 400 });
+        }
+        patch.next_follow_up_at = parsed.toISOString();
+      }
+    }
+
     // Keep `source` as first-touch acquisition. Touch/trigger is stored
     // separately in `last_touch_source`, so changing Broadcast/Follow-up
     // never steals first-touch credit from Meta Ads or Organic.

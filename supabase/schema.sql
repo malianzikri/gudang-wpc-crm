@@ -17,6 +17,9 @@ create table if not exists public.leads (
       'Quotation Final',
       'Hot',
       'Closing',
+      'Pending',
+      'No Response',
+      'Lost',
       'Tidak Layak'
     )
   ),
@@ -68,6 +71,16 @@ create table if not exists public.leads (
   is_historical boolean not null default false,
   historical_imported_at timestamptz,
 
+  product_interest text,
+  intent text,
+  project_size text,
+  project_location text,
+  estimated_value numeric(14,2) not null default 0,
+  next_follow_up_at timestamptz,
+  follow_up_reason text,
+  pending_reason text,
+  lost_reason text,
+  lead_score integer not null default 0,
   notes text,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
