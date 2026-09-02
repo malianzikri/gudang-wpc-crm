@@ -14,15 +14,31 @@ function validDate(value: string | null) {
   return value && /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : null;
 }
 
-function applyDateRange(query: any, since: string | null, until: string | null) {
+type DateBasis = "lead" | "activity";
+
+function validDateBasis(value: string | null): DateBasis {
+  return value === "activity" ? "activity" : "lead";
+}
+
+function dateColumn(dateBasis: DateBasis) {
+  return dateBasis === "activity" ? "last_seen_at" : "first_seen_at";
+}
+
+function applyDateRange(
+  query: any,
+  since: string | null,
+  until: string | null,
+  dateBasis: DateBasis
+) {
   let next = query;
+  const column = dateColumn(dateBasis);
 
   if (since) {
-    next = next.gte("first_seen_at", `${since}T00:00:00.000+07:00`);
+    next = next.gte(column, `${since}T00:00:00.000+07:00`);
   }
 
   if (until) {
-    next = next.lte("first_seen_at", `${until}T23:59:59.999+07:00`);
+    next = next.lte(column, `${until}T23:59:59.999+07:00`);
   }
 
   return next;
@@ -136,15 +152,23 @@ export async function GET(request: Request) {
     const q = url.searchParams.get("q")?.trim();
     const since = validDate(url.searchParams.get("since"));
     const until = validDate(url.searchParams.get("until"));
+    const dateBasis = validDateBasis(url.searchParams.get("date_basis"));
+    const activeDateColumn = dateColumn(dateBasis);
 
-    // Summary is based on FIRST-TOUCH cohort date.
+    // Summary follows selected CRM date basis.
+    // Source attribution itself remains FIRST TOUCH.
     let summaryQuery = db
       .from("leads")
-      .select("status,source,last_touch_source,revenue,first_seen_at")
-      .order("first_seen_at", { ascending: false })
+      .select("status,source,last_touch_source,revenue,first_seen_at,last_seen_at")
+      .order(activeDateColumn, { ascending: false })
       .limit(5000);
 
-    summaryQuery = applyDateRange(summaryQuery, since, until);
+    summaryQuery = applyDateRange(
+      summaryQuery,
+      since,
+      until,
+      dateBasis
+    );
 
     const { data: summaryRows, error: summaryError } = await summaryQuery;
     if (summaryError) throw summaryError;
@@ -152,10 +176,15 @@ export async function GET(request: Request) {
     let query = db
       .from("leads")
       .select("*")
-      .order("last_seen_at", { ascending: false })
+      .order(activeDateColumn, { ascending: false })
       .limit(500);
 
-    query = applyDateRange(query, since, until);
+    query = applyDateRange(
+      query,
+      since,
+      until,
+      dateBasis
+    );
 
     if (status) query = query.eq("status", status);
     query = applySourceGroup(query, source);
@@ -185,6 +214,8 @@ export async function GET(request: Request) {
       ok: true,
       since,
       until,
+      date_basis: dateBasis,
+      date_column: activeDateColumn,
       leads: (data ?? []).map((lead: any) => ({
         ...lead,
         status: normalizeLeadStatus(lead.status),

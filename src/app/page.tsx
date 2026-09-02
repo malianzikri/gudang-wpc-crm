@@ -245,6 +245,7 @@ export default function Dashboard() {
   const [q, setQ] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
   const [sourceFilter, setSourceFilter] = useState("");
+  const [leadDateBasis, setLeadDateBasis] = useState<"lead" | "activity">("lead");
   const [audienceType, setAudienceType] = useState<
     "all" | "high_intent" | "closing"
   >("all");
@@ -263,7 +264,8 @@ export default function Dashboard() {
 
   async function load(
     rangeSince = since,
-    rangeUntil = until
+    rangeUntil = until,
+    rangeDateBasis: "lead" | "activity" = leadDateBasis
   ) {
     setLoading(true);
     setError("");
@@ -271,7 +273,8 @@ export default function Dashboard() {
     try {
       const params = new URLSearchParams({
         since: rangeSince,
-        until: rangeUntil
+        until: rangeUntil,
+        date_basis: rangeDateBasis
       });
 
       if (statusFilter) params.set("status", statusFilter);
@@ -542,10 +545,34 @@ export default function Dashboard() {
     setSince(nextSince);
     setUntil(nextUntil);
 
-    // Date presets filter BOTH CRM leads and cached performance.
-    // They do NOT call Meta.
-    load(nextSince, nextUntil);
+    // CRM follows selected date basis.
+    // Meta performance remains based on the selected acquisition period.
+    load(nextSince, nextUntil, leadDateBasis);
     loadPerformanceCache(nextSince, nextUntil);
+  }
+
+  function setYesterday() {
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+
+    const date = dateInputLocal(yesterday);
+
+    setSince(date);
+    setUntil(date);
+
+    load(date, date, leadDateBasis);
+    loadPerformanceCache(date, date);
+  }
+
+  function changeLeadDateBasis(nextBasis: "lead" | "activity") {
+    setLeadDateBasis(nextBasis);
+
+    // Make the table immediately useful for the selected mode.
+    setSortKey(nextBasis === "activity" ? "last_seen_at" : "first_seen_at");
+    setSortDirection("desc");
+
+    // Switching basis reloads CRM only. It does NOT call Meta.
+    load(since, until, nextBasis);
   }
 
 
@@ -722,7 +749,7 @@ export default function Dashboard() {
       )}
 
       <section className="headline-cards">
-        <div className="headline-card"><div className="label">Total Lead</div><div className="value">{summary.total}</div></div>
+        <div className="headline-card"><div className="label">{leadDateBasis === "activity" ? "Lead Aktif" : "Total Lead"}</div><div className="value">{summary.total}</div></div>
         <div className="headline-card"><div className="label">High Intent</div><div className="value">{summary.highIntent}</div></div>
         <div className="headline-card"><div className="label">Closing</div><div className="value">{summary.closing}</div></div>
         <div className="headline-card"><div className="label">Revenue Closing</div><div className="value">{rupiah(summary.revenue)}</div></div>
@@ -738,7 +765,12 @@ export default function Dashboard() {
       <section className="card" style={{ marginBottom: 18, padding: 0, overflow: "hidden" }}>
         <div style={{ padding: "16px 18px 10px" }}>
           <h2 style={{ margin: 0, fontSize: 18 }}>Sumber & Status Lead</h2>
-          <div className="sub">Ringkasan berdasarkan sumber pertama (first touch). Broadcast dipisahkan sebagai reaktivasi/touch, jadi tidak lagi mencuri kredit dari Meta atau Organic.</div>
+          <div className="sub">
+            {leadDateBasis === "activity"
+              ? "Menampilkan lead yang aktivitas WhatsApp terakhirnya berada pada periode terpilih; sumber tetap berdasarkan first touch."
+              : "Menampilkan lead yang pertama kali masuk pada periode terpilih; sumber tetap berdasarkan first touch."}{" "}
+            Broadcast dipisahkan sebagai reaktivasi/touch.
+          </div>
         </div>
         <div className="table-wrap">
           <table style={{ minWidth: 980 }}>
@@ -802,7 +834,7 @@ export default function Dashboard() {
           <div>
             <h2 style={{ margin: 0, fontSize: 21 }}>Performa Iklan</h2>
             <div className="sub" style={{ fontSize: 13 }}>
-              Filter tanggal berlaku ke Spend Meta, kartu lead, funnel, dan tabel lead berdasarkan waktu pertama lead masuk CRM. Refresh biasa tidak memanggil Meta.
+              Spend/CPL/ROAS Meta tetap berdasarkan periode tanggal yang dipilih. Kartu, funnel, dan tabel CRM mengikuti mode {leadDateBasis === "activity" ? "Aktivitas Terakhir" : "Lead Masuk"}. Refresh biasa tidak memanggil Meta.
             </div>
           </div>
 
@@ -814,8 +846,26 @@ export default function Dashboard() {
               alignItems: "center"
             }}
           >
+            <select
+              className="control"
+              value={leadDateBasis}
+              onChange={(e) =>
+                changeLeadDateBasis(
+                  e.target.value as "lead" | "activity"
+                )
+              }
+              title="Pilih basis tanggal untuk lead CRM"
+              style={{ minWidth: 180 }}
+            >
+              <option value="lead">Filter: Lead Masuk</option>
+              <option value="activity">Filter: Aktivitas Terakhir</option>
+            </select>
+
             <button className="refresh" onClick={() => setRange(1)}>
               Hari ini
+            </button>
+            <button className="refresh" onClick={setYesterday}>
+              Kemarin
             </button>
             <button className="refresh" onClick={() => setRange(7)}>
               7 hari
@@ -842,7 +892,7 @@ export default function Dashboard() {
             <button
               className="refresh"
               onClick={() => {
-                load(since, until);
+                load(since, until, leadDateBasis);
                 loadPerformanceCache(since, until);
               }}
               disabled={performanceLoading || loading}
@@ -1125,10 +1175,18 @@ export default function Dashboard() {
           alignItems: "center"
         }}
       >
-        <strong>Periode Lead:</strong>
+        <strong>
+          {leadDateBasis === "activity"
+            ? "Periode Aktivitas:"
+            : "Periode Lead Masuk:"}
+        </strong>
         <span>{since} s.d. {until}</span>
         <span>•</span>
-        <span>Lead dihitung dari waktu first touch. Data lama hasil backfill tetap memakai tanggal lead aslinya.</span>
+        <span>
+          {leadDateBasis === "activity"
+            ? "Lead difilter dari aktivitas WhatsApp terakhir (last_seen_at)."
+            : "Lead difilter dari waktu pertama masuk CRM (first_seen_at)."}
+        </span>
       </div>
 
       <div className="funnel">
@@ -1189,7 +1247,7 @@ export default function Dashboard() {
         <div style={{ minWidth: 240, flex: "1 1 280px" }}>
           <div className="label">Export Custom Audience Meta</div>
           <div className="sub">
-            Mengikuti periode {since} s.d. {until}. Tidak memanggil API Meta.
+            Mengikuti periode {since} s.d. {until}. Export audience tetap berdasarkan tanggal Lead Masuk, bukan aktivitas terakhir. Tidak memanggil API Meta.
           </div>
         </div>
 
