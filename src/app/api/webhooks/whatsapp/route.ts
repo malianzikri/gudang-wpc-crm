@@ -210,6 +210,14 @@ export async function POST(request: Request) {
               last_seen_at: messageTime
             };
 
+            // Do not automatically change pipeline status when a dormant lead
+            // replies. Flag it as reactivated so sales can review and decide
+            // whether it should return to Tanya Aja / Qualified / Hot.
+            if (["No Response", "Pending"].includes(String(existing.status || ""))) {
+              patch.reactivated_at = messageTime;
+              patch.reactivated_from_status = existing.status;
+            }
+
             // A normal inbound reply never overwrites a manual Broadcast /
             // Follow-up touch. Only initialize an empty touch.
             if (!existing.last_touch_source) {
@@ -269,10 +277,22 @@ export async function POST(request: Request) {
               }
             }
 
-            const { error: updateError } = await db
+            let { error: updateError } = await db
               .from("leads")
               .update(patch)
               .eq("id", leadId);
+
+            // Backward-safe deploy: if code reaches production before the V4
+            // SQL migration, ordinary WhatsApp replies must keep working.
+            if (updateError && (patch.reactivated_at || patch.reactivated_from_status)) {
+              const message = String(updateError.message || "").toLowerCase();
+              if (message.includes("reactivated_at") || message.includes("reactivated_from_status")) {
+                delete patch.reactivated_at;
+                delete patch.reactivated_from_status;
+                const retry = await db.from("leads").update(patch).eq("id", leadId);
+                updateError = retry.error;
+              }
+            }
 
             if (updateError) throw updateError;
           }

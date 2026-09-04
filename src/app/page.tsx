@@ -1,7 +1,7 @@
 "use client";
 
 import { Fragment, useEffect, useMemo, useState } from "react";
-import { HIGH_INTENT_STATUSES, STATUSES, TOUCH_OPTIONS, PRODUCTS, INTENTS, FOLLOW_UP_REASONS, statusRank, statusLabel, suggestedNextAction } from "@/lib/lead-pipeline";
+import { HIGH_INTENT_STATUSES, STATUSES, TOUCH_OPTIONS, PRODUCTS, INTENTS, FOLLOW_UP_REASONS, PENDING_REASONS, LOST_REASONS, statusRank, statusLabel, suggestedNextAction } from "@/lib/lead-pipeline";
 
 type Lead = {
   id: string;
@@ -38,6 +38,47 @@ type Lead = {
   pending_reason: string | null;
   lost_reason: string | null;
   lead_score: number;
+  notes: string | null;
+  reactivated_at: string | null;
+  reactivated_from_status: string | null;
+};
+
+
+type LeadDraft = {
+  status: string;
+  revenue: string;
+  last_touch_source: string;
+  product_interest: string;
+  intent: string;
+  project_size: string;
+  project_location: string;
+  estimated_value: string;
+  next_follow_up_at: string;
+  follow_up_reason: string;
+  pending_reason: string;
+  lost_reason: string;
+  notes: string;
+  lead_score: string;
+};
+
+type AudienceRow = {
+  key: string;
+  label: string;
+  current_count: number;
+  synced_count: number;
+  additions: number;
+  removals: number;
+  last_uploaded_at: string | null;
+  last_downloaded_at: string | null;
+  last_export_mode: string | null;
+  last_export_count: number;
+};
+
+type AudienceResponse = {
+  ok: boolean;
+  tracking_ready: boolean;
+  audiences: AudienceRow[];
+  error?: string;
 };
 
 type PerformanceMetrics = {
@@ -234,9 +275,7 @@ export default function Dashboard() {
   const [leadSummary, setLeadSummary] = useState<LeadSummary | null>(null);
   const [sortKey, setSortKey] = useState<SortKey>("last_seen_at");
   const [sortDirection, setSortDirection] = useState<"asc" | "desc">("desc");
-  const [drafts, setDrafts] = useState<
-    Record<string, { status: string; revenue: string; last_touch_source: string; product_interest: string; intent: string; project_size: string; project_location: string; estimated_value: string; next_follow_up_at: string; follow_up_reason: string; lead_score: string }>
-  >({});
+  const [drafts, setDrafts] = useState<Record<string, LeadDraft>>({});
   const [loading, setLoading] = useState(true);
   const [savingId, setSavingId] = useState<string | null>(null);
   const [backfilling, setBackfilling] = useState(false);
@@ -246,10 +285,13 @@ export default function Dashboard() {
   const [statusFilter, setStatusFilter] = useState("");
   const [sourceFilter, setSourceFilter] = useState("");
   const [leadDateBasis, setLeadDateBasis] = useState<"lead" | "activity">("lead");
-  const [audienceType, setAudienceType] = useState<
-    "all" | "high_intent" | "closing"
-  >("all");
-  const [quickFilter, setQuickFilter] = useState<"" | "hot" | "estimate" | "qualified" | "ask" | "builder" | "overdue">("");
+  const [audienceType, setAudienceType] = useState("all");
+  const [audienceMode, setAudienceMode] = useState<"full" | "add" | "remove">("add");
+  const [audienceInfo, setAudienceInfo] = useState<AudienceResponse | null>(null);
+  const [audienceLoading, setAudienceLoading] = useState(false);
+  const [lastAudienceExport, setLastAudienceExport] = useState<{ id: string; count: number; filename: string } | null>(null);
+  const [quickFilter, setQuickFilter] = useState<"" | "today" | "overdue" | "reactivated" | "hot" | "estimate" | "qualified" | "ask" | "builder" | "pending" | "no_response" | "unplanned">("");
+  const [queueCounts, setQueueCounts] = useState<Record<string, number>>({});
   const [expandedRows, setExpandedRows] = useState<Record<string, boolean>>({});
 
   const [since, setSince] = useState(dateInputLocal(sevenDaysAgo));
@@ -277,8 +319,13 @@ export default function Dashboard() {
         date_basis: rangeDateBasis
       });
 
-      if (statusFilter) params.set("status", statusFilter);
-      if (sourceFilter) params.set("source", sourceFilter);
+      if (quickFilter) {
+        params.set("queue", "1");
+        params.set("quick", quickFilter);
+      }
+
+      if (!quickFilter && statusFilter) params.set("status", statusFilter);
+      if (!quickFilter && sourceFilter) params.set("source", sourceFilter);
       if (q.trim()) params.set("q", q.trim());
 
       const res = await fetch(`/api/leads?${params.toString()}`, {
@@ -293,11 +340,9 @@ export default function Dashboard() {
 
       setLeads(json.leads);
       setLeadSummary(json.summary ?? null);
+      setQueueCounts(json.queue_counts ?? {});
 
-      const nextDrafts: Record<
-        string,
-        { status: string; revenue: string; last_touch_source: string; product_interest: string; intent: string; project_size: string; project_location: string; estimated_value: string; next_follow_up_at: string; follow_up_reason: string; lead_score: string }
-      > = {};
+      const nextDrafts: Record<string, LeadDraft> = {};
 
       for (const lead of json.leads) {
         nextDrafts[lead.id] = {
@@ -311,6 +356,9 @@ export default function Dashboard() {
           estimated_value: String(Number(lead.estimated_value || 0)),
           next_follow_up_at: lead.next_follow_up_at ? new Date(lead.next_follow_up_at).toISOString().slice(0,16) : "",
           follow_up_reason: lead.follow_up_reason || "",
+          pending_reason: lead.pending_reason || "",
+          lost_reason: lead.lost_reason || "",
+          notes: lead.notes || "",
           lead_score: String(Number(lead.lead_score || 0))
         };
       }
@@ -320,6 +368,20 @@ export default function Dashboard() {
       setError(e.message || "Terjadi kesalahan.");
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function loadAudienceInfo() {
+    setAudienceLoading(true);
+    try {
+      const res = await fetch("/api/leads/audience", { cache: "no-store" });
+      const json = await res.json();
+      if (!res.ok || !json.ok) throw new Error(json.error || "Gagal membaca Custom Audience.");
+      setAudienceInfo(json);
+    } catch (e: any) {
+      setError(e.message || "Gagal membaca Custom Audience.");
+    } finally {
+      setAudienceLoading(false);
     }
   }
 
@@ -394,6 +456,7 @@ export default function Dashboard() {
   useEffect(() => {
     load();
     loadPerformanceCache();
+    loadAudienceInfo();
 
     const clock = window.setInterval(() => setNowMs(Date.now()), 30000);
     return () => window.clearInterval(clock);
@@ -410,6 +473,11 @@ export default function Dashboard() {
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [q]);
+
+  useEffect(() => {
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [quickFilter]);
 
   async function saveLead(lead: Lead) {
     const draft = drafts[lead.id];
@@ -431,8 +499,12 @@ export default function Dashboard() {
           intent: draft.intent,
           project_size: draft.project_size,
           project_location: draft.project_location,
+          estimated_value: Number(draft.estimated_value || 0),
           next_follow_up_at: draft.next_follow_up_at || null,
           follow_up_reason: draft.follow_up_reason,
+          pending_reason: draft.status === "Pending" ? draft.pending_reason : null,
+          lost_reason: draft.status === "Lost" ? draft.lost_reason : null,
+          notes: draft.notes,
           lead_score: autoLeadScore(draft.status, draft)
         })
       });
@@ -479,12 +551,16 @@ export default function Dashboard() {
           estimated_value: String(Number(json.lead.estimated_value || 0)),
           next_follow_up_at: json.lead.next_follow_up_at ? new Date(json.lead.next_follow_up_at).toISOString().slice(0,16) : "",
           follow_up_reason: json.lead.follow_up_reason || "",
+          pending_reason: json.lead.pending_reason || "",
+          lost_reason: json.lead.lost_reason || "",
+          notes: json.lead.notes || "",
           lead_score: String(Number(json.lead.lead_score || 0))
         }
       }));
 
       await load();
       await loadPerformanceCache();
+      await loadAudienceInfo();
     } catch (e: any) {
       setError(e.message || "Gagal menyimpan.");
     } finally {
@@ -576,16 +652,64 @@ export default function Dashboard() {
   }
 
 
-  function exportCustomAudience() {
-    const params = new URLSearchParams({
-      since,
-      until,
-      type: audienceType
-    });
+  async function exportCustomAudience() {
+    setAudienceLoading(true);
+    setError("");
+    setNotice("");
+    try {
+      const res = await fetch("/api/leads/export", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type: audienceType, mode: audienceMode })
+      });
+      if (!res.ok) {
+        const json = await res.json().catch(() => ({}));
+        throw new Error(json.error || "Gagal export Custom Audience.");
+      }
 
-    // Export uses current dashboard date range.
-    // This endpoint only reads Supabase and does not call Meta.
-    window.location.href = `/api/leads/export?${params.toString()}`;
+      const blob = await res.blob();
+      const exportId = res.headers.get("X-Audience-Export-Id") || "";
+      const count = Number(res.headers.get("X-Audience-Export-Count") || 0);
+      const filename = res.headers.get("X-Audience-Export-Filename") || "META_CA.csv";
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = filename;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+
+      setLastAudienceExport(exportId ? { id: exportId, count, filename } : null);
+      setNotice(`CSV Custom Audience dibuat: ${count} data. Setelah selesai upload ke Meta, klik "Tandai sudah di-upload".`);
+      await loadAudienceInfo();
+    } catch (e: any) {
+      setError(e.message || "Gagal export Custom Audience.");
+    } finally {
+      setAudienceLoading(false);
+    }
+  }
+
+  async function confirmAudienceUploaded() {
+    if (!lastAudienceExport?.id) return;
+    setAudienceLoading(true);
+    setError("");
+    try {
+      const res = await fetch("/api/leads/audience", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ export_id: lastAudienceExport.id })
+      });
+      const json = await res.json();
+      if (!res.ok || !json.ok) throw new Error(json.error || "Gagal menandai upload audience.");
+      setNotice(`Audience Meta ditandai sudah di-upload (${lastAudienceExport.count} data).`);
+      setLastAudienceExport(null);
+      await loadAudienceInfo();
+    } catch (e: any) {
+      setError(e.message || "Gagal menandai upload audience.");
+    } finally {
+      setAudienceLoading(false);
+    }
   }
 
   const canSyncPerformance =
@@ -639,7 +763,12 @@ export default function Dashboard() {
       if (quickFilter === "qualified") return ["Foto Area Diterima", "Qualified"].includes(lead.status);
       if (quickFilter === "ask") return lead.status === "Tanya Kebutuhan";
       if (quickFilter === "builder") return lead.status === "Chat Builder";
-      if (quickFilter === "overdue") return Boolean(lead.next_follow_up_at && new Date(lead.next_follow_up_at).getTime() < nowMs && !["Closing", "Lost", "Tidak Layak"].includes(lead.status));
+      if (quickFilter === "pending") return lead.status === "Pending";
+      if (quickFilter === "no_response") return lead.status === "No Response";
+      if (quickFilter === "reactivated") return Boolean(lead.reactivated_at && ["No Response", "Pending"].includes(lead.status));
+      if (quickFilter === "unplanned") return Boolean(!lead.next_follow_up_at && !["Closing", "Lost", "Tidak Layak", "No Response"].includes(lead.status));
+      if (quickFilter === "today") return Boolean(lead.next_follow_up_at && new Date(lead.next_follow_up_at).toLocaleDateString("en-CA", { timeZone: "Asia/Jakarta" }) === new Date(nowMs).toLocaleDateString("en-CA", { timeZone: "Asia/Jakarta" }));
+      if (quickFilter === "overdue") return Boolean(lead.next_follow_up_at && new Date(lead.next_follow_up_at).getTime() < nowMs && new Date(lead.next_follow_up_at).toLocaleDateString("en-CA", { timeZone: "Asia/Jakarta" }) !== new Date(nowMs).toLocaleDateString("en-CA", { timeZone: "Asia/Jakarta" }) && !["Closing", "Lost", "Tidak Layak"].includes(lead.status));
       return true;
     });
 
@@ -1152,15 +1281,20 @@ export default function Dashboard() {
         <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
           <div>
             <h2 style={{ margin: 0, fontSize: 19 }}>Butuh Tindakan Hari Ini</h2>
-            <div className="sub">Prioritas kerja sales. Follow-up yang lewat jadwal ditandai overdue di tabel.</div>
+            <div className="sub">Queue ini lintas periode lead masuk. Jadi lead lama yang No Response, overdue, atau membalas lagi tetap muncul.</div>
           </div>
           <div className="action-cards">
-            <button className={`action-card-button ${quickFilter === "hot" ? "active" : ""}`} onClick={() => setQuickFilter(quickFilter === "hot" ? "" : "hot")}><b>{leads.filter(l => l.status === "Hot").length}</b><span>Hot</span></button>
-            <button className={`action-card-button ${quickFilter === "estimate" ? "active" : ""}`} onClick={() => setQuickFilter(quickFilter === "estimate" ? "" : "estimate")}><b>{leads.filter(l => l.status === "Estimasi Dikirim").length}</b><span>Estimasi</span></button>
-            <button className={`action-card-button ${quickFilter === "qualified" ? "active" : ""}`} onClick={() => setQuickFilter(quickFilter === "qualified" ? "" : "qualified")}><b>{leads.filter(l => ["Foto Area Diterima","Qualified"].includes(l.status)).length}</b><span>Qualified</span></button>
-            <button className={`action-card-button ${quickFilter === "ask" ? "active" : ""}`} onClick={() => setQuickFilter(quickFilter === "ask" ? "" : "ask")}><b>{leads.filter(l => l.status === "Tanya Kebutuhan").length}</b><span>Tanya Aja</span></button>
-            <button className={`action-card-button ${quickFilter === "builder" ? "active" : ""}`} onClick={() => setQuickFilter(quickFilter === "builder" ? "" : "builder")}><b>{leads.filter(l => l.status === "Chat Builder").length}</b><span>Builder</span></button>
-            <button className={`action-card-button ${quickFilter === "overdue" ? "active" : ""}`} onClick={() => setQuickFilter(quickFilter === "overdue" ? "" : "overdue")}><b>{leads.filter(l => l.next_follow_up_at && new Date(l.next_follow_up_at).getTime() < nowMs && !["Closing","Lost","Tidak Layak"].includes(l.status)).length}</b><span>Overdue</span></button>
+            <button className={`action-card-button ${quickFilter === "today" ? "active" : ""}`} onClick={() => setQuickFilter(quickFilter === "today" ? "" : "today")}><b>{queueCounts.today ?? 0}</b><span>FU Hari Ini</span></button>
+            <button className={`action-card-button ${quickFilter === "overdue" ? "active" : ""}`} onClick={() => setQuickFilter(quickFilter === "overdue" ? "" : "overdue")}><b>{queueCounts.overdue ?? 0}</b><span>Overdue</span></button>
+            <button className={`action-card-button ${quickFilter === "reactivated" ? "active" : ""}`} onClick={() => setQuickFilter(quickFilter === "reactivated" ? "" : "reactivated")}><b>{queueCounts.reactivated ?? 0}</b><span>Balas Lagi</span></button>
+            <button className={`action-card-button ${quickFilter === "hot" ? "active" : ""}`} onClick={() => setQuickFilter(quickFilter === "hot" ? "" : "hot")}><b>{queueCounts.hot ?? 0}</b><span>Hot</span></button>
+            <button className={`action-card-button ${quickFilter === "estimate" ? "active" : ""}`} onClick={() => setQuickFilter(quickFilter === "estimate" ? "" : "estimate")}><b>{queueCounts.estimate ?? 0}</b><span>Estimasi</span></button>
+            <button className={`action-card-button ${quickFilter === "qualified" ? "active" : ""}`} onClick={() => setQuickFilter(quickFilter === "qualified" ? "" : "qualified")}><b>{queueCounts.qualified ?? 0}</b><span>Qualified</span></button>
+            <button className={`action-card-button ${quickFilter === "ask" ? "active" : ""}`} onClick={() => setQuickFilter(quickFilter === "ask" ? "" : "ask")}><b>{queueCounts.ask ?? 0}</b><span>Tanya Aja</span></button>
+            <button className={`action-card-button ${quickFilter === "builder" ? "active" : ""}`} onClick={() => setQuickFilter(quickFilter === "builder" ? "" : "builder")}><b>{queueCounts.builder ?? 0}</b><span>Builder</span></button>
+            <button className={`action-card-button ${quickFilter === "pending" ? "active" : ""}`} onClick={() => setQuickFilter(quickFilter === "pending" ? "" : "pending")}><b>{queueCounts.pending ?? 0}</b><span>Pending</span></button>
+            <button className={`action-card-button ${quickFilter === "no_response" ? "active" : ""}`} onClick={() => setQuickFilter(quickFilter === "no_response" ? "" : "no_response")}><b>{queueCounts.no_response ?? 0}</b><span>No Response</span></button>
+            <button className={`action-card-button ${quickFilter === "unplanned" ? "active" : ""}`} onClick={() => setQuickFilter(quickFilter === "unplanned" ? "" : "unplanned")}><b>{queueCounts.unplanned ?? 0}</b><span>Belum Ada FU</span></button>
           </div>
         </div>
       </section>
@@ -1233,48 +1367,74 @@ export default function Dashboard() {
         </select>
       </section>
 
-      <section
-        className="card"
-        style={{
-          marginBottom: 14,
-          padding: 14,
-          display: "flex",
-          gap: 10,
-          alignItems: "center",
-          flexWrap: "wrap"
-        }}
-      >
-        <div style={{ minWidth: 240, flex: "1 1 280px" }}>
-          <div className="label">Export Custom Audience Meta</div>
-          <div className="sub">
-            Mengikuti periode {since} s.d. {until}. Export audience tetap berdasarkan tanggal Lead Masuk, bukan aktivitas terakhir. Tidak memanggil API Meta.
+      <section className="card audience-card" style={{ marginBottom: 14 }}>
+        <div className="audience-header">
+          <div>
+            <div className="label">Meta Custom Audience</div>
+            <h3>Data audience dari status CRM terkini</h3>
+            <div className="sub">Tidak lagi mengikuti periode dashboard. CRM mencatat data yang sudah kamu tandai selesai di-upload ke Meta.</div>
           </div>
+          <button className="refresh" onClick={loadAudienceInfo} disabled={audienceLoading}>{audienceLoading ? "Memuat…" : "Refresh Audience"}</button>
         </div>
 
-        <select
-          className="control"
-          value={audienceType}
-          onChange={(e) =>
-            setAudienceType(
-              e.target.value as "all" | "high_intent" | "closing"
-            )
-          }
-          style={{ minWidth: 220 }}
-        >
-          <option value="all">All Leads</option>
-          <option value="high_intent">
-            High Intent (Foto / Qualified / Survey / Quotation Final / Hot)
-          </option>
-          <option value="closing">Closing</option>
-        </select>
+        {!audienceInfo?.tracking_ready && audienceInfo && (
+          <div className="audience-warning">Jalankan file SQL <b>supabase/crm_sales_audience_v4_patch.sql</b> sekali agar histori/sinkronisasi audience aktif.</div>
+        )}
 
-        <button className="save" onClick={exportCustomAudience}>
-          Export CSV Meta
-        </button>
+        <div className="audience-grid">
+          {(audienceInfo?.audiences ?? []).map((item) => (
+            <button key={item.key} className={`audience-segment ${audienceType === item.key ? "active" : ""}`} onClick={() => setAudienceType(item.key)}>
+              <strong>{item.label}</strong>
+              <span>{item.current_count} current</span>
+              <small>+{item.additions} add · -{item.removals} remove</small>
+            </button>
+          ))}
+        </div>
+
+        <div className="audience-controls">
+          <select className="control" value={audienceType} onChange={(e) => setAudienceType(e.target.value)}>
+            <option value="all">All Leads</option>
+            <option value="qualified_plus">Qualified+</option>
+            <option value="hot_estimate">Hot / Estimasi</option>
+            <option value="closing">Closing</option>
+            <option value="no_response">No Response</option>
+            <option value="wpc">Produk WPC</option>
+            <option value="pvc">Produk PVC</option>
+            <option value="wallboard_uv">Wallboard / UV Marble</option>
+          </select>
+          <select className="control" value={audienceMode} onChange={(e) => setAudienceMode(e.target.value as "full" | "add" | "remove")}>
+            <option value="add">ADD — hanya yang belum pernah disinkron</option>
+            <option value="remove">REMOVE — sudah tidak cocok dengan segment</option>
+            <option value="full">FULL — seluruh anggota segment saat ini</option>
+          </select>
+          <button className="save" onClick={exportCustomAudience} disabled={audienceLoading || !audienceInfo?.tracking_ready}>
+            {audienceLoading ? "Memproses…" : "Download CSV Meta"}
+          </button>
+          {lastAudienceExport && (
+            <button className="confirm-upload" onClick={confirmAudienceUploaded} disabled={audienceLoading}>Tandai sudah di-upload Meta</button>
+          )}
+        </div>
+
+        {lastAudienceExport && <div className="audience-download-pending"><b>Menunggu konfirmasi upload:</b> {lastAudienceExport.filename} · {lastAudienceExport.count} data</div>}
+
+        {(() => {
+          const selected = audienceInfo?.audiences.find((item) => item.key === audienceType);
+          if (!selected) return null;
+          return (
+            <div className="audience-status-line">
+              <span><b>Current:</b> {selected.current_count}</span>
+              <span><b>Sudah sinkron:</b> {selected.synced_count}</span>
+              <span><b>ADD:</b> {selected.additions}</span>
+              <span><b>REMOVE:</b> {selected.removals}</span>
+              <span><b>Upload terakhir:</b> {selected.last_uploaded_at ? dateTime(selected.last_uploaded_at) : "Belum pernah"}</span>
+            </div>
+          );
+        })()}
+        <div className="sub audience-help">ADD dipakai untuk data baru/baru masuk segment. REMOVE dipakai saat status berubah dan harus keluar dari segment. FULL adalah daftar kondisi CRM saat ini.</div>
       </section>
 
       <section className="panel lead-panel">
-        {quickFilter && <div className="quick-filter-banner">Filter cepat aktif: <strong>{{hot:"Hot",estimate:"Estimasi",qualified:"Qualified",ask:"Tanya Aja",builder:"Builder",overdue:"Overdue"}[quickFilter]}</strong><button onClick={() => setQuickFilter("")}>Tampilkan semua</button></div>}
+        {quickFilter && <div className="quick-filter-banner">Sales Queue aktif: <strong>{{today:"FU Hari Ini",overdue:"Overdue",reactivated:"Balas Lagi",hot:"Hot",estimate:"Estimasi",qualified:"Qualified",ask:"Tanya Aja",builder:"Builder",pending:"Pending",no_response:"No Response",unplanned:"Belum Ada FU"}[quickFilter]}</strong><button onClick={() => setQuickFilter("")}>Kembali ke periode</button></div>}
         <div className="table-wrap lead-table-wrap">
           <table className="lead-table">
             <thead>
@@ -1296,7 +1456,7 @@ export default function Dashboard() {
                 const draft = drafts[lead.id] ?? {
                   status: lead.status, revenue: String(Number(lead.revenue || 0)), last_touch_source: lead.last_touch_source || lead.source || "WhatsApp Organic",
                   product_interest: lead.product_interest || "", intent: lead.intent || "", project_size: lead.project_size || "", project_location: lead.project_location || "",
-                  estimated_value: String(Number(lead.estimated_value || 0)), next_follow_up_at: lead.next_follow_up_at ? new Date(lead.next_follow_up_at).toISOString().slice(0,16) : "", follow_up_reason: lead.follow_up_reason || "", lead_score: String(Number(lead.lead_score || 0))
+                  estimated_value: String(Number(lead.estimated_value || 0)), next_follow_up_at: lead.next_follow_up_at ? new Date(lead.next_follow_up_at).toISOString().slice(0,16) : "", follow_up_reason: lead.follow_up_reason || "", pending_reason: lead.pending_reason || "", lost_reason: lead.lost_reason || "", notes: lead.notes || "", lead_score: String(Number(lead.lead_score || 0))
                 };
                 const score = autoLeadScore(draft.status, draft);
                 const followUp = followUpLabel(draft.next_follow_up_at || lead.next_follow_up_at, nowMs);
@@ -1308,6 +1468,7 @@ export default function Dashboard() {
                         <div className="name">{lead.name || "Tanpa nama"}</div>
                         <div className="sub">{lead.phone || `+${lead.wa_id}`}</div>
                         <div className="lead-source-line">{lead.source}{lead.campaign_name ? ` · ${lead.campaign_name}` : ""}</div>
+                        {lead.reactivated_at && ["No Response", "Pending"].includes(lead.status) && <div className="reactivated-badge">Balas lagi · {dateTime(lead.reactivated_at)}</div>}
                       </td>
                       <td><div className="compact-date">{dateTime(lead.first_seen_at)}</div></td>
                       <td><div className="compact-date">{dateTime(lead.last_seen_at)}</div></td>
@@ -1340,6 +1501,8 @@ export default function Dashboard() {
                               <select className="mini-control" value={draft.intent} onChange={(e) => setDrafts((d) => ({...d,[lead.id]: {...draft,intent:e.target.value}}))}><option value="">Intent</option>{INTENTS.map((x)=><option key={x} value={x}>{x}</option>)}</select>
                               <input className="mini-control" placeholder="Ukuran 3x3,5 m" value={draft.project_size} onChange={(e) => setDrafts((d) => ({...d,[lead.id]: {...draft,project_size:e.target.value}}))}/>
                               <input className="mini-control" placeholder="Lokasi proyek" value={draft.project_location} onChange={(e) => setDrafts((d) => ({...d,[lead.id]: {...draft,project_location:e.target.value}}))}/>
+                              <input className="mini-control" inputMode="numeric" placeholder="Estimasi potensi Rp" value={draft.estimated_value} onChange={(e) => setDrafts((d) => ({...d,[lead.id]: {...draft,estimated_value:e.target.value.replace(/[^\d]/g,"")}}))}/>
+                              <div className="estimate-preview">Potensi: <b>{rupiah(Number(draft.estimated_value || 0))}</b></div>
                             </div>
                           </div>
                           <div className="detail-block">
@@ -1349,7 +1512,10 @@ export default function Dashboard() {
                               <select className="mini-control" value={draft.follow_up_reason} onChange={(e) => setDrafts((d) => ({...d,[lead.id]: {...draft,follow_up_reason:e.target.value}}))}><option value="">Alasan FU</option>{FOLLOW_UP_REASONS.map((x)=><option key={x} value={x}>{x}</option>)}</select>
                               <select className="mini-control" value={draft.last_touch_source} onChange={(e) => setDrafts((d) => ({...d,[lead.id]: {...draft,last_touch_source:e.target.value}}))}>{TOUCH_OPTIONS.map((x)=><option key={x} value={x}>{x}</option>)}</select>
                               <div className="auto-score-box"><span>Auto Score</span><strong>{score}/100</strong><small>Dihitung dari status + data kebutuhan</small></div>
+                              {draft.status === "Pending" && <select className="mini-control" value={draft.pending_reason} onChange={(e) => setDrafts((d) => ({...d,[lead.id]: {...draft,pending_reason:e.target.value}}))}><option value="">Alasan Pending</option>{PENDING_REASONS.map((x)=><option key={x} value={x}>{x}</option>)}</select>}
+                              {draft.status === "Lost" && <select className="mini-control" value={draft.lost_reason} onChange={(e) => setDrafts((d) => ({...d,[lead.id]: {...draft,lost_reason:e.target.value}}))}><option value="">Alasan Lost</option>{LOST_REASONS.map((x)=><option key={x} value={x}>{x}</option>)}</select>}
                             </div>
+                            <textarea className="notes-control" placeholder="Catatan sales: kebutuhan, motif, keberatan, janji follow-up…" value={draft.notes} onChange={(e) => setDrafts((d) => ({...d,[lead.id]: {...draft,notes:e.target.value}}))}/>
                           </div>
                         </div>
                       </td></tr>

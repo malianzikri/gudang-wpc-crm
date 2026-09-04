@@ -43,6 +43,17 @@ export async function PATCH(
 
       patch.status = requestedStatus;
 
+      // Once sales intentionally moves a reactivated lead to another status,
+      // remove it from the "Balas Lagi" queue.
+      if (
+        "reactivated_at" in existing &&
+        requestedStatus !== existing.status &&
+        !["No Response", "Pending"].includes(requestedStatus)
+      ) {
+        patch.reactivated_at = null;
+        patch.reactivated_from_status = null;
+      }
+
       if (requestedStatus === "Closing" && existing.status !== "Closing") {
         patch.closed_at = new Date().toISOString();
       } else if (

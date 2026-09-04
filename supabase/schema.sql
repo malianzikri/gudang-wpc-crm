@@ -82,6 +82,8 @@ create table if not exists public.leads (
   lost_reason text,
   lead_score integer not null default 0,
   notes text,
+  reactivated_at timestamptz,
+  reactivated_from_status text,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
@@ -98,6 +100,31 @@ create index if not exists leads_last_touch_source_idx on public.leads(last_touc
 create index if not exists leads_manual_campaign_idx on public.leads(manual_campaign);
 create index if not exists leads_historical_idx on public.leads(is_historical, first_seen_at desc);
 create index if not exists leads_closed_at_idx on public.leads(closed_at desc);
+
+create index if not exists leads_reactivated_at_idx on public.leads(reactivated_at desc);
+
+create table if not exists public.meta_audience_exports (
+  id uuid primary key default gen_random_uuid(),
+  audience_key text not null,
+  export_mode text not null check (export_mode in ('full','add','remove')),
+  row_count integer not null default 0,
+  lead_ids jsonb not null default '[]'::jsonb,
+  downloaded_at timestamptz not null default now(),
+  uploaded_at timestamptz
+);
+create index if not exists meta_audience_exports_key_idx
+  on public.meta_audience_exports(audience_key, downloaded_at desc);
+create index if not exists meta_audience_exports_uploaded_idx
+  on public.meta_audience_exports(uploaded_at desc);
+
+create table if not exists public.meta_audience_members (
+  audience_key text not null,
+  lead_id uuid not null references public.leads(id) on delete cascade,
+  synced_at timestamptz not null default now(),
+  primary key (audience_key, lead_id)
+);
+create index if not exists meta_audience_members_lead_idx
+  on public.meta_audience_members(lead_id);
 
 create table if not exists public.messages (
   id uuid primary key default gen_random_uuid(),
@@ -172,3 +199,5 @@ alter table public.messages enable row level security;
 alter table public.lead_status_events enable row level security;
 alter table public.meta_conversion_events enable row level security;
 alter table public.meta_performance_cache enable row level security;
+alter table public.meta_audience_exports enable row level security;
+alter table public.meta_audience_members enable row level security;

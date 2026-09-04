@@ -1,168 +1,120 @@
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase-admin";
-import { HIGH_INTENT_AUDIENCE_STATUSES } from "@/lib/lead-pipeline";
+import {
+  audienceLabel,
+  isAudienceEligible,
+  normalizePhone,
+  splitName,
+  validAudienceKey,
+  validExportMode
+} from "@/lib/meta-audience";
 
 export const runtime = "nodejs";
-
-type ExportType = "all" | "high_intent" | "closing";
-
-function validDate(value: string | null) {
-  return value && /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : null;
-}
-
-function validType(value: string | null): ExportType {
-  if (value === "high_intent" || value === "closing") return value;
-  return "all";
-}
-
-function normalizePhone(raw: string | null | undefined) {
-  if (!raw) return "";
-
-  let digits = String(raw).replace(/\D/g, "");
-
-  if (!digits) return "";
-
-  // Indonesian local numbers -> country code 62.
-  if (digits.startsWith("0")) {
-    digits = `62${digits.slice(1)}`;
-  }
-
-  // Handles accidental 6208... style input.
-  if (digits.startsWith("620")) {
-    digits = `62${digits.slice(3)}`;
-  }
-
-  // If the CRM stores WA ID as 62..., this remains unchanged.
-  return digits;
-}
-
-function splitName(raw: string | null | undefined) {
-  const name = String(raw || "").trim().replace(/\s+/g, " ");
-
-  if (!name) {
-    return { fn: "", ln: "" };
-  }
-
-  const parts = name.split(" ");
-
-  if (parts.length === 1) {
-    return { fn: parts[0], ln: "" };
-  }
-
-  return {
-    fn: parts[0],
-    ln: parts.slice(1).join(" ")
-  };
-}
 
 function csvCell(value: unknown) {
   const str = String(value ?? "");
   return `"${str.replace(/"/g, '""')}"`;
 }
 
-function audienceLabel(type: ExportType) {
-  if (type === "high_intent") return "HIGH_INTENT";
-  if (type === "closing") return "CLOSING";
-  return "ALL_LEADS";
+function fileToken(value: string) {
+  return value.toUpperCase().replace(/[^A-Z0-9]+/g, "_").replace(/^_|_$/g, "");
 }
 
-export async function GET(request: Request) {
+export async function POST(request: Request) {
   try {
     const db = supabaseAdmin();
-    const url = new URL(request.url);
+    const body = await request.json().catch(() => ({}));
+    const audienceKey = validAudienceKey(body?.type);
+    const mode = validExportMode(body?.mode);
 
-    const since = validDate(url.searchParams.get("since"));
-    const until = validDate(url.searchParams.get("until"));
-    const type = validType(url.searchParams.get("type"));
-
-    let query = db
+    const { data: leads, error: leadError } = await db
       .from("leads")
-      .select("id,name,phone,wa_id,status,first_seen_at")
-      .order("first_seen_at", { ascending: false })
-      .limit(5000);
+      .select("id,name,phone,wa_id,status,product_interest,updated_at")
+      .order("updated_at", { ascending: false })
+      .limit(10000);
+    if (leadError) throw leadError;
 
-    if (since) {
-      query = query.gte(
-        "first_seen_at",
-        `${since}T00:00:00.000+07:00`
+    const { data: memberRows, error: memberError } = await db
+      .from("meta_audience_members")
+      .select("lead_id")
+      .eq("audience_key", audienceKey)
+      .limit(10000);
+    if (memberError) throw memberError;
+
+    const leadRows: any[] = (leads ?? []) as any[];
+    const syncedIds = new Set<string>(((memberRows ?? []) as any[]).map((row: any) => String(row.lead_id)));
+    const currentEligible = leadRows.filter((lead: any) => isAudienceEligible(lead, audienceKey));
+    const eligibleIds = new Set<string>(currentEligible.map((lead: any) => String(lead.id)));
+
+    let selected: any[] = [];
+    if (mode === "full") {
+      selected = currentEligible;
+    } else if (mode === "add") {
+      selected = currentEligible.filter((lead: any) => !syncedIds.has(String(lead.id)));
+    } else {
+      selected = leadRows.filter(
+        (lead: any) => syncedIds.has(String(lead.id)) && !eligibleIds.has(String(lead.id))
       );
     }
 
-    if (until) {
-      query = query.lte(
-        "first_seen_at",
-        `${until}T23:59:59.999+07:00`
-      );
-    }
-
-    if (type === "high_intent") {
-      query = query.in(
-        "status",
-        [...HIGH_INTENT_AUDIENCE_STATUSES]
-      );
-    } else if (type === "closing") {
-      query = query.eq("status", "Closing");
-    }
-
-    const { data, error } = await query;
-
-    if (error) {
-      throw error;
-    }
-
-    // One row per unique phone number.
+    // One row per unique normalized phone. This avoids duplicate identifiers
+    // when the CRM contains duplicate contacts from historical imports.
     const seenPhones = new Set<string>();
     const rows: string[][] = [];
+    const exportedLeadIds: string[] = [];
 
-    for (const lead of data ?? []) {
+    for (const lead of selected) {
       const phone = normalizePhone(lead.phone || lead.wa_id);
-
       if (!phone || seenPhones.has(phone)) continue;
       seenPhones.add(phone);
 
       const { fn, ln } = splitName(lead.name);
-
-      rows.push([
-        phone,
-        fn,
-        ln,
-        "ID",
-        String(lead.id)
-      ]);
+      rows.push([phone, fn, ln, "ID", String(lead.id)]);
+      exportedLeadIds.push(String(lead.id));
     }
 
-    // Meta Customer List friendly identifiers.
-    // Meta's upload UI can map these columns automatically/manually.
     const header = ["phone", "fn", "ln", "country", "external_id"];
-
     const csv = [
       header.map(csvCell).join(","),
       ...rows.map((row) => row.map(csvCell).join(","))
     ].join("\r\n");
 
-    const filename = [
-      "META_CA",
-      audienceLabel(type),
-      since || "ALL",
-      until || "ALL"
-    ].join("_") + ".csv";
+    const { data: exportLog, error: exportError } = await db
+      .from("meta_audience_exports")
+      .insert({
+        audience_key: audienceKey,
+        export_mode: mode,
+        row_count: rows.length,
+        lead_ids: exportedLeadIds
+      })
+      .select("id")
+      .single();
+    if (exportError) throw exportError;
+
+    const date = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Asia/Jakarta",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit"
+    }).format(new Date());
+
+    const filename = `META_CA_${fileToken(audienceLabel(audienceKey))}_${mode.toUpperCase()}_${date}.csv`;
 
     return new NextResponse(csv, {
       status: 200,
       headers: {
         "Content-Type": "text/csv; charset=utf-8",
         "Content-Disposition": `attachment; filename="${filename}"`,
-        "Cache-Control": "no-store"
+        "Cache-Control": "no-store",
+        "X-Audience-Export-Id": String(exportLog.id),
+        "X-Audience-Export-Count": String(rows.length),
+        "X-Audience-Export-Filename": filename
       }
     });
   } catch (error: any) {
     console.error("Custom Audience export error:", error);
-
     return NextResponse.json(
-      {
-        ok: false,
-        error: error?.message || "Gagal membuat CSV Custom Audience."
-      },
+      { ok: false, error: error?.message || "Gagal membuat CSV Custom Audience." },
       { status: 500 }
     );
   }
