@@ -185,22 +185,6 @@ export async function POST(request: Request) {
             if (insertError) throw insertError;
 
             leadId = inserted.id;
-
-            const { error: initialStatusError } = await db
-              .from("lead_status_events")
-              .insert({
-                lead_id: leadId,
-                old_status: null,
-                new_status: "Chat Builder",
-                revenue: 0
-              });
-
-            if (initialStatusError) {
-              console.error(
-                "Initial lead_status_events insert failed:",
-                initialStatusError
-              );
-            }
           } else {
             leadId = existing.id;
 

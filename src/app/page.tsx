@@ -81,6 +81,59 @@ type AudienceResponse = {
   error?: string;
 };
 
+type SalesTransition = {
+  from: string;
+  from_label: string;
+  to: string;
+  to_label: string;
+  count: number;
+  share_from: number;
+};
+
+type SalesAnalysisResponse = {
+  ok: boolean;
+  since: string;
+  until: string;
+  summary: {
+    transitions: number;
+    leads_touched: number;
+    dropoffs: number;
+    dropoff_rate: number;
+    closings: number;
+    reactivated: number;
+    avg_hours_to_close: number;
+  };
+  transitions: SalesTransition[];
+  dropoffs: SalesTransition[];
+  durations: Array<{
+    from: string;
+    from_label: string;
+    to: string;
+    to_label: string;
+    count: number;
+    avg_hours: number;
+  }>;
+  reasons: {
+    pending: Array<{ reason: string; count: number }>;
+    lost: Array<{ reason: string; count: number }>;
+  };
+  error?: string;
+};
+
+type LeadHistoryResponse = {
+  ok: boolean;
+  lead: { id: string; status: string; current_since: string; current_hours: number };
+  history: Array<{
+    id: string;
+    old_status: string | null;
+    new_status: string;
+    revenue: number | string | null;
+    created_at: string;
+    hours_in_previous_status: number | null;
+  }>;
+  error?: string;
+};
+
 type PerformanceMetrics = {
   spend: number;
   impressions: number;
@@ -195,6 +248,13 @@ function dateTime(value: string) {
   }).format(new Date(value));
 }
 
+function durationLabel(hours: number) {
+  const value = Number(hours || 0);
+  if (value < 24) return `${Math.max(0, Math.round(value * 10) / 10)} jam`;
+  if (value < 24 * 30) return `${Math.round((value / 24) * 10) / 10} hari`;
+  return `${Math.round((value / (24 * 30)) * 10) / 10} bulan`;
+}
+
 function dateInputLocal(date: Date) {
   return new Intl.DateTimeFormat("en-CA", {
     timeZone: "Asia/Jakarta",
@@ -290,6 +350,9 @@ export default function Dashboard() {
   const [audienceInfo, setAudienceInfo] = useState<AudienceResponse | null>(null);
   const [audienceLoading, setAudienceLoading] = useState(false);
   const [lastAudienceExport, setLastAudienceExport] = useState<{ id: string; count: number; filename: string } | null>(null);
+  const [salesAnalysis, setSalesAnalysis] = useState<SalesAnalysisResponse | null>(null);
+  const [salesAnalysisLoading, setSalesAnalysisLoading] = useState(false);
+  const [leadHistory, setLeadHistory] = useState<Record<string, { loading: boolean; data?: LeadHistoryResponse; error?: string }>>({});
   const [quickFilter, setQuickFilter] = useState<"" | "today" | "overdue" | "reactivated" | "hot" | "estimate" | "qualified" | "ask" | "builder" | "pending" | "no_response" | "unplanned">("");
   const [queueCounts, setQueueCounts] = useState<Record<string, number>>({});
   const [expandedRows, setExpandedRows] = useState<Record<string, boolean>>({});
@@ -385,6 +448,57 @@ export default function Dashboard() {
     }
   }
 
+  async function loadSalesAnalysis(rangeSince = since, rangeUntil = until) {
+    setSalesAnalysisLoading(true);
+    try {
+      const params = new URLSearchParams({ since: rangeSince, until: rangeUntil });
+      const res = await fetch(`/api/sales-analysis?${params.toString()}`, { cache: "no-store" });
+      const json = await res.json();
+      if (!res.ok || !json.ok) throw new Error(json.error || "Gagal membaca analisa sales.");
+      setSalesAnalysis(json);
+    } catch (e: any) {
+      setError(e.message || "Gagal membaca analisa sales.");
+    } finally {
+      setSalesAnalysisLoading(false);
+    }
+  }
+
+  async function loadLeadHistory(leadId: string, force = false) {
+    const existing = leadHistory[leadId];
+    if (!force && (existing?.loading || existing?.data)) return;
+
+    setLeadHistory((current) => ({
+      ...current,
+      [leadId]: { ...current[leadId], loading: true, error: undefined }
+    }));
+
+    try {
+      const res = await fetch(`/api/leads/${leadId}`, { cache: "no-store" });
+      const json = await res.json();
+      if (!res.ok || !json.ok) throw new Error(json.error || "Gagal membaca riwayat status.");
+      setLeadHistory((current) => ({
+        ...current,
+        [leadId]: { loading: false, data: json }
+      }));
+    } catch (e: any) {
+      setLeadHistory((current) => ({
+        ...current,
+        [leadId]: { loading: false, error: e.message || "Gagal membaca riwayat status." }
+      }));
+    }
+  }
+
+  function openLeadDetails(leadId: string) {
+    setExpandedRows((current) => ({ ...current, [leadId]: true }));
+    void loadLeadHistory(leadId);
+  }
+
+  function toggleLeadDetails(leadId: string) {
+    const willOpen = !expandedRows[leadId];
+    setExpandedRows((current) => ({ ...current, [leadId]: willOpen }));
+    if (willOpen) void loadLeadHistory(leadId);
+  }
+
   async function loadPerformanceCache(
     rangeSince = since,
     rangeUntil = until
@@ -457,6 +571,7 @@ export default function Dashboard() {
     load();
     loadPerformanceCache();
     loadAudienceInfo();
+    loadSalesAnalysis();
 
     const clock = window.setInterval(() => setNowMs(Date.now()), 30000);
     return () => window.clearInterval(clock);
@@ -561,6 +676,8 @@ export default function Dashboard() {
       await load();
       await loadPerformanceCache();
       await loadAudienceInfo();
+      await loadSalesAnalysis();
+      if (expandedRows[lead.id]) await loadLeadHistory(lead.id, true);
     } catch (e: any) {
       setError(e.message || "Gagal menyimpan.");
     } finally {
@@ -625,6 +742,7 @@ export default function Dashboard() {
     // Meta performance remains based on the selected acquisition period.
     load(nextSince, nextUntil, leadDateBasis);
     loadPerformanceCache(nextSince, nextUntil);
+    loadSalesAnalysis(nextSince, nextUntil);
   }
 
   function setYesterday() {
@@ -638,6 +756,7 @@ export default function Dashboard() {
 
     load(date, date, leadDateBasis);
     loadPerformanceCache(date, date);
+    loadSalesAnalysis(date, date);
   }
 
   function changeLeadDateBasis(nextBasis: "lead" | "activity") {
@@ -1023,6 +1142,7 @@ export default function Dashboard() {
               onClick={() => {
                 load(since, until, leadDateBasis);
                 loadPerformanceCache(since, until);
+                loadSalesAnalysis(since, until);
               }}
               disabled={performanceLoading || loading}
               title="Memfilter lead CRM + membaca cache performa, tanpa request ke Meta"
@@ -1367,6 +1487,65 @@ export default function Dashboard() {
         </select>
       </section>
 
+      <section className="card sales-analysis-card" style={{ marginBottom: 14 }}>
+        <div className="sales-analysis-header">
+          <div>
+            <div className="label">Analisa Sales</div>
+            <h3>Perjalanan status & bottleneck</h3>
+            <div className="sub">Mengikuti tanggal saat status berubah: {since} s.d. {until}. Tidak tergantung filter Lead Masuk/Aktivitas.</div>
+          </div>
+          <button className="refresh" onClick={() => loadSalesAnalysis()} disabled={salesAnalysisLoading}>{salesAnalysisLoading ? "Memuat…" : "Refresh Analisa"}</button>
+        </div>
+
+        <div className="sales-analysis-kpis">
+          <div><span>Perpindahan Status</span><strong>{salesAnalysis?.summary.transitions ?? 0}</strong><small>{salesAnalysis?.summary.leads_touched ?? 0} lead terlibat</small></div>
+          <div><span>Drop-off</span><strong>{salesAnalysis?.summary.dropoffs ?? 0}</strong><small>{pct(salesAnalysis?.summary.dropoff_rate ?? 0)} dari perpindahan</small></div>
+          <div><span>Balik Aktif</span><strong>{salesAnalysis?.summary.reactivated ?? 0}</strong><small>No Response/Pending → aktif</small></div>
+          <div><span>Masuk Closing</span><strong>{salesAnalysis?.summary.closings ?? 0}</strong><small>berdasarkan perubahan status</small></div>
+          <div><span>Rata-rata ke Closing</span><strong>{durationLabel(salesAnalysis?.summary.avg_hours_to_close ?? 0)}</strong><small>dari histori status pertama</small></div>
+        </div>
+
+        <div className="sales-analysis-columns">
+          <div className="analysis-box">
+            <div className="detail-title">Perpindahan Terbanyak</div>
+            {(salesAnalysis?.transitions ?? []).length === 0 ? <div className="sub">Belum ada perpindahan status di periode ini.</div> : (salesAnalysis?.transitions ?? []).slice(0, 8).map((item) => (
+              <div className="transition-row" key={`${item.from}-${item.to}`}>
+                <span>{item.from_label} <b>→</b> {item.to_label}</span>
+                <strong>{item.count}</strong>
+                <small>{pct(item.share_from)} dari perpindahan keluar {item.from_label}</small>
+              </div>
+            ))}
+          </div>
+          <div className="analysis-box">
+            <div className="detail-title">Drop-off Terbesar</div>
+            {(salesAnalysis?.dropoffs ?? []).length === 0 ? <div className="sub">Belum ada drop-off tercatat di periode ini.</div> : (salesAnalysis?.dropoffs ?? []).map((item) => (
+              <div className="transition-row danger-transition" key={`${item.from}-${item.to}`}>
+                <span>{item.from_label} <b>→</b> {item.to_label}</span>
+                <strong>{item.count}</strong>
+                <small>{pct(item.share_from)} dari perpindahan keluar {item.from_label}</small>
+              </div>
+            ))}
+          </div>
+          <div className="analysis-box">
+            <div className="detail-title">Waktu Antar Tahap</div>
+            {(salesAnalysis?.durations ?? []).length === 0 ? <div className="sub">Durasi akan muncul setelah ada minimal dua event status.</div> : (salesAnalysis?.durations ?? []).slice(0, 8).map((item) => (
+              <div className="duration-row" key={`${item.from}-${item.to}`}>
+                <span>{item.from_label} → {item.to_label}</span>
+                <strong>{durationLabel(item.avg_hours)}</strong>
+                <small>{item.count} perpindahan</small>
+              </div>
+            ))}
+          </div>
+          <div className="analysis-box">
+            <div className="detail-title">Alasan Pending / Lost Saat Ini</div>
+            <div className="reason-columns">
+              <div><b>Pending</b>{(salesAnalysis?.reasons.pending ?? []).slice(0,5).map((item) => <span key={`p-${item.reason}`}>{item.reason} <strong>{item.count}</strong></span>)}</div>
+              <div><b>Lost</b>{(salesAnalysis?.reasons.lost ?? []).slice(0,5).map((item) => <span key={`l-${item.reason}`}>{item.reason} <strong>{item.count}</strong></span>)}</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
       <section className="card audience-card" style={{ marginBottom: 14 }}>
         <div className="audience-header">
           <div>
@@ -1479,10 +1658,10 @@ export default function Dashboard() {
                       </td>
                       <td><span className={`score-badge score-${score >= 85 ? "hot" : score >= 55 ? "warm" : "low"}`}>{score}</span></td>
                       <td><div className={`next-action compact-next status-${draft.status.replace(/\s+/g,"-").toLowerCase()}`}><strong>Next:</strong> {suggestedNextAction(draft.status)}</div></td>
-                      <td><button className={followUp.overdue ? "followup-chip overdue-chip" : "followup-chip"} onClick={() => setExpandedRows((x) => ({...x,[lead.id]:true}))}>{followUp.text}</button></td>
+                      <td><button className={followUp.overdue ? "followup-chip overdue-chip" : "followup-chip"} onClick={() => openLeadDetails(lead.id)}>{followUp.text}</button></td>
                       <td><input className="revenue compact-revenue" inputMode="numeric" value={draft.revenue} onChange={(e) => setDrafts((d) => ({...d,[lead.id]: {...draft,revenue:e.target.value.replace(/[^\d]/g,"")}}))}/></td>
                       <td><div className={lead.capi_purchase_sent_at || lead.capi_lead_sent_at ? "source-meta capi-small" : "capi-small"}>{capiLabel(lead)}</div></td>
-                      <td><div className="row-actions"><button className="detail-button" onClick={() => setExpandedRows((x) => ({...x,[lead.id]:!expanded}))}>{expanded ? "Tutup" : "Detail Sales"}</button><button className="save" disabled={savingId === lead.id} onClick={() => saveLead(lead)}>{savingId === lead.id ? "Simpan…" : "Simpan"}</button></div></td>
+                      <td><div className="row-actions"><button className="detail-button" onClick={() => toggleLeadDetails(lead.id)}>{expanded ? "Tutup" : "Detail Sales"}</button><button className="save" disabled={savingId === lead.id} onClick={() => saveLead(lead)}>{savingId === lead.id ? "Simpan…" : "Simpan"}</button></div></td>
                     </tr>
                     {expanded && (
                       <tr className="detail-row"><td colSpan={10}>
@@ -1516,6 +1695,30 @@ export default function Dashboard() {
                               {draft.status === "Lost" && <select className="mini-control" value={draft.lost_reason} onChange={(e) => setDrafts((d) => ({...d,[lead.id]: {...draft,lost_reason:e.target.value}}))}><option value="">Alasan Lost</option>{LOST_REASONS.map((x)=><option key={x} value={x}>{x}</option>)}</select>}
                             </div>
                             <textarea className="notes-control" placeholder="Catatan sales: kebutuhan, motif, keberatan, janji follow-up…" value={draft.notes} onChange={(e) => setDrafts((d) => ({...d,[lead.id]: {...draft,notes:e.target.value}}))}/>
+                          </div>
+                          <div className="detail-block history-block">
+                            <div className="history-heading">
+                              <div>
+                                <div className="detail-title">Riwayat Status</div>
+                                {leadHistory[lead.id]?.data?.lead && <div className="sub">Status sekarang <b>{statusLabel(leadHistory[lead.id]!.data!.lead.status)}</b> selama {durationLabel(leadHistory[lead.id]!.data!.lead.current_hours)}.</div>}
+                              </div>
+                              <button className="refresh history-refresh" onClick={() => loadLeadHistory(lead.id, true)} disabled={leadHistory[lead.id]?.loading}>{leadHistory[lead.id]?.loading ? "Memuat…" : "Refresh"}</button>
+                            </div>
+                            {leadHistory[lead.id]?.error && <div className="history-error">{leadHistory[lead.id]?.error}</div>}
+                            {!leadHistory[lead.id]?.data && !leadHistory[lead.id]?.error && <div className="sub">Memuat perjalanan status…</div>}
+                            <div className="status-timeline">
+                              {(leadHistory[lead.id]?.data?.history ?? []).slice().reverse().map((event) => (
+                                <div className="status-event" key={event.id}>
+                                  <div className="status-event-dot" />
+                                  <div>
+                                    <strong>{event.old_status ? `${statusLabel(event.old_status)} → ${statusLabel(event.new_status)}` : `Mulai → ${statusLabel(event.new_status)}`}</strong>
+                                    <span>{dateTime(event.created_at)}</span>
+                                    {event.hours_in_previous_status !== null && <small>Sebelumnya berada di tahap itu selama {durationLabel(event.hours_in_previous_status)}</small>}
+                                  </div>
+                                  {Number(event.revenue || 0) > 0 && <b className="history-revenue">{rupiah(Number(event.revenue || 0))}</b>}
+                                </div>
+                              ))}
+                            </div>
                           </div>
                         </div>
                       </td></tr>

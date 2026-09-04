@@ -201,3 +201,38 @@ alter table public.meta_conversion_events enable row level security;
 alter table public.meta_performance_cache enable row level security;
 alter table public.meta_audience_exports enable row level security;
 alter table public.meta_audience_members enable row level security;
+
+-- V5: database-level status history. This makes status transitions auditable
+-- even when a lead is updated outside the CRM UI.
+create index if not exists lead_status_events_lead_created_idx
+  on public.lead_status_events (lead_id, created_at asc);
+create index if not exists lead_status_events_created_idx
+  on public.lead_status_events (created_at desc);
+
+create or replace function public.crm_log_lead_status_change()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if tg_op = 'INSERT' then
+    if new.status is not null then
+      insert into public.lead_status_events (lead_id, old_status, new_status, revenue, created_at)
+      values (new.id, null, new.status, coalesce(new.revenue, 0), coalesce(new.first_seen_at, now()));
+    end if;
+    return new;
+  end if;
+
+  if new.status is distinct from old.status then
+    insert into public.lead_status_events (lead_id, old_status, new_status, revenue, created_at)
+    values (new.id, old.status, new.status, coalesce(new.revenue, 0), now());
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists trg_crm_lead_status_history on public.leads;
+create trigger trg_crm_lead_status_history
+after insert or update of status on public.leads
+for each row execute function public.crm_log_lead_status_change();

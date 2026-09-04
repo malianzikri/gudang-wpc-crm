@@ -12,6 +12,63 @@ import {
 const ALLOWED_STATUS = new Set<string>(STATUSES);
 const ALLOWED_TOUCH = new Set<string>(TOUCH_OPTIONS);
 
+export async function GET(
+  _request: Request,
+  context: { params: Promise<{ id: string }> }
+) {
+  try {
+    const { id } = await context.params;
+    const db = supabaseAdmin();
+
+    const [{ data: lead, error: leadError }, { data: events, error: eventError }] = await Promise.all([
+      db.from("leads").select("id,status,first_seen_at,last_seen_at").eq("id", id).single(),
+      db
+        .from("lead_status_events")
+        .select("id,old_status,new_status,revenue,created_at")
+        .eq("lead_id", id)
+        .order("created_at", { ascending: true })
+        .limit(500)
+    ]);
+
+    if (leadError) throw leadError;
+    if (eventError) throw eventError;
+
+    let previousAt: string | null = null;
+    const history = (events ?? []).map((event: any) => {
+      const hours = previousAt
+        ? Math.max(0, (new Date(event.created_at).getTime() - new Date(previousAt).getTime()) / 3600000)
+        : null;
+      previousAt = event.created_at;
+      return {
+        ...event,
+        old_status: event.old_status ? normalizeLeadStatus(event.old_status) : null,
+        new_status: normalizeLeadStatus(event.new_status),
+        hours_in_previous_status: hours === null ? null : Math.round(hours * 10) / 10
+      };
+    });
+
+    const lastEvent = history.length ? history[history.length - 1] : null;
+    const currentSince = lastEvent?.created_at || lead.first_seen_at;
+
+    return NextResponse.json({
+      ok: true,
+      lead: {
+        id: lead.id,
+        status: normalizeLeadStatus(lead.status),
+        current_since: currentSince,
+        current_hours: Math.max(0, Math.round(((Date.now() - new Date(currentSince).getTime()) / 3600000) * 10) / 10)
+      },
+      history
+    });
+  } catch (error: any) {
+    console.error("GET /api/leads/[id] history error:", error);
+    return NextResponse.json(
+      { ok: false, error: error?.message || "Gagal membaca riwayat status." },
+      { status: 500 }
+    );
+  }
+}
+
 export async function PATCH(
   request: Request,
   context: { params: Promise<{ id: string }> }
@@ -195,23 +252,6 @@ export async function PATCH(
       throw new Error(
         `Revenue tidak tersimpan. Requested=${patch.revenue}, DB=${updated.revenue}`
       );
-    }
-
-    if (patch.status !== undefined && patch.status !== existing.status) {
-      const { error: eventError } = await db
-        .from("lead_status_events")
-        .insert({
-          lead_id: id,
-          old_status: existing.status,
-          new_status: patch.status,
-          revenue: updated.revenue ?? 0
-        });
-
-      // The CRM update has already succeeded; audit logging must not make
-      // the user think the lead itself failed to save.
-      if (eventError) {
-        console.error("lead_status_events insert failed:", eventError);
-      }
     }
 
     const capi: Record<string, any> = {};
