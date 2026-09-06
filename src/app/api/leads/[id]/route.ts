@@ -12,63 +12,6 @@ import {
 const ALLOWED_STATUS = new Set<string>(STATUSES);
 const ALLOWED_TOUCH = new Set<string>(TOUCH_OPTIONS);
 
-export async function GET(
-  _request: Request,
-  context: { params: Promise<{ id: string }> }
-) {
-  try {
-    const { id } = await context.params;
-    const db = supabaseAdmin();
-
-    const [{ data: lead, error: leadError }, { data: events, error: eventError }] = await Promise.all([
-      db.from("leads").select("id,status,first_seen_at,last_seen_at").eq("id", id).single(),
-      db
-        .from("lead_status_events")
-        .select("id,old_status,new_status,revenue,created_at")
-        .eq("lead_id", id)
-        .order("created_at", { ascending: true })
-        .limit(500)
-    ]);
-
-    if (leadError) throw leadError;
-    if (eventError) throw eventError;
-
-    let previousAt: string | null = null;
-    const history = (events ?? []).map((event: any) => {
-      const hours = previousAt
-        ? Math.max(0, (new Date(event.created_at).getTime() - new Date(previousAt).getTime()) / 3600000)
-        : null;
-      previousAt = event.created_at;
-      return {
-        ...event,
-        old_status: event.old_status ? normalizeLeadStatus(event.old_status) : null,
-        new_status: normalizeLeadStatus(event.new_status),
-        hours_in_previous_status: hours === null ? null : Math.round(hours * 10) / 10
-      };
-    });
-
-    const lastEvent = history.length ? history[history.length - 1] : null;
-    const currentSince = lastEvent?.created_at || lead.first_seen_at;
-
-    return NextResponse.json({
-      ok: true,
-      lead: {
-        id: lead.id,
-        status: normalizeLeadStatus(lead.status),
-        current_since: currentSince,
-        current_hours: Math.max(0, Math.round(((Date.now() - new Date(currentSince).getTime()) / 3600000) * 10) / 10)
-      },
-      history
-    });
-  } catch (error: any) {
-    console.error("GET /api/leads/[id] history error:", error);
-    return NextResponse.json(
-      { ok: false, error: error?.message || "Gagal membaca riwayat status." },
-      { status: 500 }
-    );
-  }
-}
-
 export async function PATCH(
   request: Request,
   context: { params: Promise<{ id: string }> }
@@ -99,17 +42,6 @@ export async function PATCH(
       }
 
       patch.status = requestedStatus;
-
-      // Once sales intentionally moves a reactivated lead to another status,
-      // remove it from the "Balas Lagi" queue.
-      if (
-        "reactivated_at" in existing &&
-        requestedStatus !== existing.status &&
-        !["No Response", "Pending"].includes(requestedStatus)
-      ) {
-        patch.reactivated_at = null;
-        patch.reactivated_from_status = null;
-      }
 
       if (requestedStatus === "Closing" && existing.status !== "Closing") {
         patch.closed_at = new Date().toISOString();
@@ -159,7 +91,7 @@ export async function PATCH(
 
     const stringFields = [
       "product_interest", "intent", "project_size", "project_location",
-      "follow_up_reason", "pending_reason", "lost_reason"
+      "follow_up_reason", "pending_reason", "no_response_reason", "lost_reason"
     ];
     for (const field of stringFields) {
       if (body[field] !== undefined) {
@@ -252,6 +184,128 @@ export async function PATCH(
       throw new Error(
         `Revenue tidak tersimpan. Requested=${patch.revenue}, DB=${updated.revenue}`
       );
+    }
+
+    if (patch.status !== undefined && patch.status !== existing.status) {
+      const { error: eventError } = await db
+        .from("lead_status_events")
+        .insert({
+          lead_id: id,
+          old_status: existing.status,
+          new_status: patch.status,
+          revenue: updated.revenue ?? 0
+        });
+
+      // The CRM update has already succeeded; audit logging must not make
+      // the user think the lead itself failed to save.
+      if (eventError) {
+        console.error("lead_status_events insert failed:", eventError);
+      }
+    }
+
+    // Lightweight sales activity history. This complements status events
+    // and WhatsApp messages without changing first-touch attribution.
+    const activityEvents: Array<Record<string, any>> = [];
+
+    if (
+      updated.last_touch_source !== existing.last_touch_source
+    ) {
+      activityEvents.push({
+        lead_id: id,
+        event_type: "touch",
+        label: "Touch / Trigger diubah",
+        detail: `${existing.last_touch_source || existing.source || "—"} → ${updated.last_touch_source || "—"}`,
+        metadata: {
+          old_value: existing.last_touch_source || existing.source || null,
+          new_value: updated.last_touch_source || null
+        }
+      });
+    }
+
+    if (
+      String(updated.next_follow_up_at || "") !==
+        String(existing.next_follow_up_at || "") ||
+      String(updated.follow_up_reason || "") !==
+        String(existing.follow_up_reason || "")
+    ) {
+      const followUpDate = updated.next_follow_up_at
+        ? new Date(updated.next_follow_up_at).toISOString()
+        : null;
+
+      activityEvents.push({
+        lead_id: id,
+        event_type: "follow_up",
+        label: updated.next_follow_up_at
+          ? `Follow-up ${updated.follow_up_reason || ""}`.trim()
+          : "Follow-up diselesaikan / dihapus",
+        detail: followUpDate
+          ? `Jadwal: ${followUpDate}`
+          : "Tidak ada jadwal follow-up aktif.",
+        metadata: {
+          follow_up_at: followUpDate,
+          reason: updated.follow_up_reason || null
+        }
+      });
+    }
+
+    if (
+      Number(updated.estimated_value || 0) !==
+      Number(existing.estimated_value || 0)
+    ) {
+      activityEvents.push({
+        lead_id: id,
+        event_type: "estimate",
+        label: "Nilai estimasi diperbarui",
+        detail: `${Number(existing.estimated_value || 0)} → ${Number(updated.estimated_value || 0)}`,
+        metadata: {
+          old_value: Number(existing.estimated_value || 0),
+          new_value: Number(updated.estimated_value || 0)
+        }
+      });
+    }
+
+    const reasonFields = [
+      ["pending_reason", "Alasan Pending"],
+      ["no_response_reason", "Alasan No Response"],
+      ["lost_reason", "Alasan Lost"]
+    ] as const;
+
+    for (const [field, label] of reasonFields) {
+      if (String(updated[field] || "") !== String(existing[field] || "")) {
+        activityEvents.push({
+          lead_id: id,
+          event_type: "reason",
+          label,
+          detail: String(updated[field] || "Dikosongkan"),
+          metadata: {
+            field,
+            old_value: existing[field] || null,
+            new_value: updated[field] || null
+          }
+        });
+      }
+    }
+
+    if (String(updated.notes || "") !== String(existing.notes || "")) {
+      activityEvents.push({
+        lead_id: id,
+        event_type: "notes",
+        label: "Catatan sales diperbarui",
+        detail: String(updated.notes || "").slice(0, 500) || "Catatan dikosongkan.",
+        metadata: null
+      });
+    }
+
+    if (activityEvents.length > 0) {
+      const { error: activityError } = await db
+        .from("lead_activity_events")
+        .insert(activityEvents);
+
+      // Same rule as status history: never fail the actual CRM save
+      // just because optional timeline logging has an issue.
+      if (activityError) {
+        console.error("lead_activity_events insert failed:", activityError);
+      }
     }
 
     const capi: Record<string, any> = {};

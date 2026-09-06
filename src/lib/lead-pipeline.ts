@@ -59,8 +59,9 @@ export const HOT_STATUSES = new Set<string>(["Hot", "Closing"]);
 
 export const PRODUCTS = ["WPC", "PVC Plafon", "Wallboard", "UV Marble", "Interior", "Lainnya"] as const;
 export const INTENTS = ["Cek Harga", "Cek Stok", "Cari Motif", "Hitung Kebutuhan", "Material + Pasang", "Jasa Pasang", "Survey", "Lainnya"] as const;
-export const FOLLOW_UP_REASONS = ["Final FU Builder", "Kirim Katalog", "Info Restock", "Hitung Kebutuhan", "Follow Up Estimasi", "Closing", "Follow Up Pending", "Lainnya"] as const;
+export const FOLLOW_UP_REASONS = ["FU 1", "FU 2", "Final FU", "Final FU Builder", "Kirim Katalog", "Info Restock", "Hitung Kebutuhan", "Follow Up Estimasi", "Closing", "Follow Up Pending", "Lainnya"] as const;
 export const PENDING_REASONS = ["Renovasi belum mulai", "Menunggu budget", "Bulan depan", "Menunggu pasangan/keluarga", "Menunggu tukang", "Lainnya"] as const;
+export const NO_RESPONSE_REASONS = ["Tidak balas setelah FU 1", "Tidak balas setelah FU 2", "Tidak balas setelah Final FU", "Read / dilihat saja", "Nomor tidak aktif", "Lainnya"] as const;
 export const LOST_REASONS = ["Harga", "Beli kompetitor", "Tidak jadi renovasi", "Di luar area", "Produk tidak cocok", "Tidak diketahui", "Lainnya"] as const;
 
 export const SOURCE_GROUPS = [
