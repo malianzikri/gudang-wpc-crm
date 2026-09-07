@@ -107,6 +107,17 @@ export async function PATCH(
       patch.estimated_value = value;
     }
 
+    if (body.cost_of_goods !== undefined) {
+      const value = Number(body.cost_of_goods || 0);
+      if (!Number.isFinite(value) || value < 0) {
+        return NextResponse.json(
+          { ok: false, error: "Invalid cost of goods" },
+          { status: 400 }
+        );
+      }
+      patch.cost_of_goods = value;
+    }
+
     if (body.lead_score !== undefined) {
       const score = Math.max(0, Math.min(100, Math.round(Number(body.lead_score || 0))));
       if (!Number.isFinite(score)) {
@@ -282,6 +293,22 @@ export async function PATCH(
         metadata: {
           old_value: Number(existing.estimated_value || 0),
           new_value: Number(updated.estimated_value || 0)
+        }
+      });
+    }
+
+    if (
+      Number(updated.cost_of_goods || 0) !==
+      Number(existing.cost_of_goods || 0)
+    ) {
+      activityEvents.push({
+        lead_id: id,
+        event_type: "profit",
+        label: "Modal / COGS diperbarui",
+        detail: `${Number(existing.cost_of_goods || 0)} → ${Number(updated.cost_of_goods || 0)}`,
+        metadata: {
+          old_value: Number(existing.cost_of_goods || 0),
+          new_value: Number(updated.cost_of_goods || 0)
         }
       });
     }

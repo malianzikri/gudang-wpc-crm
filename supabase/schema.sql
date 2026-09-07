@@ -76,9 +76,12 @@ create table if not exists public.leads (
   project_size text,
   project_location text,
   estimated_value numeric(14,2) not null default 0,
+  cost_of_goods numeric(14,2) not null default 0,
+  status_changed_at timestamptz not null default now(),
   next_follow_up_at timestamptz,
   follow_up_reason text,
   pending_reason text,
+  no_response_reason text,
   lost_reason text,
   lead_score integer not null default 0,
   notes text,
@@ -100,6 +103,8 @@ create index if not exists leads_last_touch_source_idx on public.leads(last_touc
 create index if not exists leads_manual_campaign_idx on public.leads(manual_campaign);
 create index if not exists leads_historical_idx on public.leads(is_historical, first_seen_at desc);
 create index if not exists leads_closed_at_idx on public.leads(closed_at desc);
+create index if not exists leads_updated_at_idx on public.leads(updated_at desc);
+create index if not exists leads_status_changed_at_idx on public.leads(status_changed_at asc);
 
 create index if not exists leads_reactivated_at_idx on public.leads(reactivated_at desc);
 
@@ -149,6 +154,18 @@ create table if not exists public.lead_status_events (
   created_at timestamptz not null default now()
 );
 
+create table if not exists public.lead_activity_events (
+  id uuid primary key default gen_random_uuid(),
+  lead_id uuid not null references public.leads(id) on delete cascade,
+  event_type text not null,
+  label text not null,
+  detail text,
+  metadata jsonb,
+  created_at timestamptz not null default now()
+);
+create index if not exists lead_activity_events_lead_created_idx
+  on public.lead_activity_events(lead_id, created_at desc);
+
 create table if not exists public.meta_conversion_events (
   id uuid primary key default gen_random_uuid(),
   lead_id uuid not null references public.leads(id) on delete cascade,
@@ -185,6 +202,11 @@ language plpgsql
 as $$
 begin
   new.updated_at = now();
+
+  if new.status is distinct from old.status then
+    new.status_changed_at = now();
+  end if;
+
   return new;
 end;
 $$;
@@ -197,6 +219,7 @@ for each row execute function public.set_updated_at();
 alter table public.leads enable row level security;
 alter table public.messages enable row level security;
 alter table public.lead_status_events enable row level security;
+alter table public.lead_activity_events enable row level security;
 alter table public.meta_conversion_events enable row level security;
 alter table public.meta_performance_cache enable row level security;
 alter table public.meta_audience_exports enable row level security;

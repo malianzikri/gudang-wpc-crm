@@ -76,6 +76,7 @@ function buildSummary(rows: any[]) {
       total: 0,
       closing: 0,
       revenue: 0,
+      grossProfit: 0,
       statuses: {} as Record<string, number>
     });
   }
@@ -84,6 +85,8 @@ function buildSummary(rows: any[]) {
   let survey = 0;
   let closing = 0;
   let revenue = 0;
+  let costOfGoods = 0;
+  let grossProfit = 0;
   let pipelineValue = 0;
   let broadcastReactivation = 0;
   const statusCounts: Record<string, number> = {};
@@ -110,8 +113,14 @@ function buildSummary(rows: any[]) {
     }
 
     if (status === "Closing") {
+      const rowRevenue = Number(row.revenue || 0);
+      const rowCost = Number(row.cost_of_goods || 0);
+      const rowProfit = rowRevenue - rowCost;
+
       closing += 1;
-      revenue += Number(row.revenue || 0);
+      revenue += rowRevenue;
+      costOfGoods += rowCost;
+      grossProfit += rowProfit;
     } else if (!["Lost", "Tidak Layak"].includes(status)) {
       pipelineValue += Number(row.estimated_value || 0);
     }
@@ -121,8 +130,12 @@ function buildSummary(rows: any[]) {
       sourceStats.statuses[status] = (sourceStats.statuses[status] || 0) + 1;
 
       if (status === "Closing") {
+        const rowRevenue = Number(row.revenue || 0);
+        const rowCost = Number(row.cost_of_goods || 0);
+
         sourceStats.closing += 1;
-        sourceStats.revenue += Number(row.revenue || 0);
+        sourceStats.revenue += rowRevenue;
+        sourceStats.grossProfit += rowRevenue - rowCost;
       }
     }
   }
@@ -135,6 +148,9 @@ function buildSummary(rows: any[]) {
     survey,
     closing,
     revenue,
+    costOfGoods,
+    grossProfit,
+    margin: revenue > 0 ? (grossProfit / revenue) * 100 : 0,
     pipelineValue,
     broadcastReactivation,
     touchTotals,
@@ -166,7 +182,7 @@ export async function GET(request: Request) {
     // Source attribution itself remains FIRST TOUCH.
     let summaryQuery = db
       .from("leads")
-      .select("status,source,last_touch_source,revenue,estimated_value,first_seen_at,last_seen_at,updated_at")
+      .select("status,source,last_touch_source,revenue,cost_of_goods,estimated_value,first_seen_at,last_seen_at,updated_at,status_changed_at")
       .order(activeDateColumn, { ascending: false })
       .limit(5000);
 

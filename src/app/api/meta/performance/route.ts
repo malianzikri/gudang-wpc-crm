@@ -17,6 +17,7 @@ type LeadRow = {
   ad_name: string | null;
   status: string;
   revenue: number | string | null;
+  cost_of_goods: number | string | null;
   first_seen_at: string;
 };
 
@@ -33,6 +34,8 @@ type Metrics = {
   hot: number;
   closing: number;
   revenue: number;
+  cost_of_goods: number;
+  gross_profit: number;
 };
 
 type CacheRow = {
@@ -104,7 +107,9 @@ function emptyMetrics(): Metrics {
     quotation: 0,
     hot: 0,
     closing: 0,
-    revenue: 0
+    revenue: 0,
+    cost_of_goods: 0,
+    gross_profit: 0
   };
 }
 
@@ -119,7 +124,9 @@ function enrich(m: Metrics) {
     cost_per_closing: m.closing > 0 ? m.spend / m.closing : 0,
     qualified_rate: m.leads > 0 ? (m.qualified / m.leads) * 100 : 0,
     closing_rate: m.leads > 0 ? (m.closing / m.leads) * 100 : 0,
-    roas: m.spend > 0 ? m.revenue / m.spend : 0
+    margin: m.revenue > 0 ? (m.gross_profit / m.revenue) * 100 : 0,
+    roas: m.spend > 0 ? m.revenue / m.spend : 0,
+    profit_roas: m.spend > 0 ? m.gross_profit / m.spend : 0
   };
 }
 
@@ -134,8 +141,13 @@ function addLeadToMetrics(metrics: Metrics, lead: LeadRow) {
   if (HOT_STATUSES.has(status)) metrics.hot += 1;
 
   if (status === "Closing") {
+    const revenue = num(lead.revenue);
+    const cost = num(lead.cost_of_goods);
+
     metrics.closing += 1;
-    metrics.revenue += num(lead.revenue);
+    metrics.revenue += revenue;
+    metrics.cost_of_goods += cost;
+    metrics.gross_profit += revenue - cost;
   }
 }
 
@@ -210,7 +222,7 @@ async function buildPerformanceResponse(
   const { data: leads, error: leadsError } = await db
     .from("leads")
     .select(
-      "id,source_id,campaign_id,campaign_name,adset_id,adset_name,ad_name,status,revenue,first_seen_at"
+      "id,source_id,campaign_id,campaign_name,adset_id,adset_name,ad_name,status,revenue,cost_of_goods,first_seen_at"
     )
     .eq("source", "Meta Ads")
     .gte("first_seen_at", startOfDayJakarta(since))
@@ -352,11 +364,13 @@ async function buildPerformanceResponse(
     summary.hot += campaign.metrics.hot;
     summary.closing += campaign.metrics.closing;
     summary.revenue += campaign.metrics.revenue;
+    summary.cost_of_goods += campaign.metrics.cost_of_goods;
+    summary.gross_profit += campaign.metrics.gross_profit;
   }
 
   const { data: closingRows, error: closingError } = await db
     .from("leads")
-    .select("status,revenue,closed_at")
+    .select("status,revenue,cost_of_goods,closed_at")
     .eq("source", "Meta Ads")
     .eq("status", "Closing")
     .gte("closed_at", startOfDayJakarta(since))
@@ -365,12 +379,26 @@ async function buildPerformanceResponse(
 
   if (closingError) throw closingError;
 
+  const closingActivityRevenue = (closingRows ?? []).reduce(
+    (sum: number, row: any) => sum + num(row.revenue),
+    0
+  );
+  const closingActivityCost = (closingRows ?? []).reduce(
+    (sum: number, row: any) => sum + num(row.cost_of_goods),
+    0
+  );
+
   const closingActivity = {
     closing: (closingRows ?? []).length,
-    revenue: (closingRows ?? []).reduce(
-      (sum: number, row: any) => sum + num(row.revenue),
-      0
-    )
+    revenue: closingActivityRevenue,
+    cost_of_goods: closingActivityCost,
+    gross_profit: closingActivityRevenue - closingActivityCost,
+    margin:
+      closingActivityRevenue > 0
+        ? ((closingActivityRevenue - closingActivityCost) /
+            closingActivityRevenue) *
+          100
+        : 0
   };
 
   return {

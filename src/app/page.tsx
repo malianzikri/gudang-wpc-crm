@@ -33,6 +33,8 @@ type Lead = {
   project_size: string | null;
   project_location: string | null;
   estimated_value: number | string;
+  cost_of_goods: number | string;
+  status_changed_at: string;
   next_follow_up_at: string | null;
   follow_up_reason: string | null;
   pending_reason: string | null;
@@ -56,6 +58,8 @@ type PerformanceMetrics = {
   hot: number;
   closing: number;
   revenue: number;
+  cost_of_goods: number;
+  gross_profit: number;
   ctr: number;
   cpc: number;
   cpm: number;
@@ -64,7 +68,9 @@ type PerformanceMetrics = {
   cost_per_closing: number;
   qualified_rate: number;
   closing_rate: number;
+  margin: number;
   roas: number;
+  profit_roas: number;
 };
 
 type PerformanceResponse = {
@@ -72,7 +78,13 @@ type PerformanceResponse = {
   since: string;
   until: string;
   summary: PerformanceMetrics;
-  closing_activity?: { closing: number; revenue: number };
+  closing_activity?: {
+    closing: number;
+    revenue: number;
+    cost_of_goods: number;
+    gross_profit: number;
+    margin: number;
+  };
   campaigns: Array<{
     id: string;
     campaign_name: string;
@@ -101,6 +113,9 @@ type LeadSummary = {
   survey: number;
   closing: number;
   revenue: number;
+  costOfGoods: number;
+  grossProfit: number;
+  margin: number;
   pipelineValue: number;
   broadcastReactivation: number;
   touchTotals: Record<string, number>;
@@ -112,6 +127,7 @@ type LeadSummary = {
     total: number;
     closing: number;
     revenue: number;
+    grossProfit: number;
     statuses: Record<string, number>;
   }>;
 };
@@ -135,6 +151,7 @@ type SortKey =
   | "first_seen_at"
   | "last_seen_at"
   | "status"
+  | "aging"
   | "revenue";
 
 function rupiah(value: number) {
@@ -220,6 +237,59 @@ function normalizeStatusForScore(status: string) {
   return status;
 }
 
+function funnelRate(count: number, leads: number) {
+  return leads > 0 ? (count / leads) * 100 : 0;
+}
+
+function stageAgeInfo(lead: Lead, nowMs: number) {
+  if (["Closing", "Lost", "Tidak Layak"].includes(lead.status)) {
+    return {
+      ageMs: 0,
+      text: "Selesai",
+      stale: false,
+      critical: false
+    };
+  }
+
+  const base = new Date(
+    lead.status_changed_at ||
+      lead.updated_at ||
+      lead.first_seen_at
+  ).getTime();
+
+  const ageMs = Math.max(0, nowMs - base);
+  const hours = ageMs / 3600000;
+  const days = hours / 24;
+
+  const warningDays: Record<string, number> = {
+    "Chat Builder": 1,
+    "Tanya Kebutuhan": 2,
+    "Foto Area Diterima": 2,
+    Qualified: 2,
+    "Estimasi Dikirim": 3,
+    "Survey Ditawarkan": 2,
+    "Survey Terjadwal": 2,
+    "Quotation Final": 3,
+    Hot: 2,
+    Pending: 7,
+    "No Response": 14
+  };
+
+  const threshold = warningDays[lead.status] ?? 5;
+  const stale = days >= threshold;
+  const critical = days >= threshold * 2;
+
+  return {
+    ageMs,
+    text:
+      hours < 24
+        ? `${Math.max(1, Math.floor(hours))} jam`
+        : `${Math.floor(days)} hari`,
+    stale,
+    critical
+  };
+}
+
 function followUpLabel(value: string | null | undefined, nowMs: number) {
   if (!value) return { text: "+ Jadwalkan FU", overdue: false };
   const date = new Date(value);
@@ -249,7 +319,7 @@ export default function Dashboard() {
   const [sortKey, setSortKey] = useState<SortKey>("last_seen_at");
   const [sortDirection, setSortDirection] = useState<"asc" | "desc">("desc");
   const [drafts, setDrafts] = useState<
-    Record<string, { status: string; revenue: string; last_touch_source: string; product_interest: string; intent: string; project_size: string; project_location: string; estimated_value: string; next_follow_up_at: string; follow_up_reason: string; pending_reason: string; no_response_reason: string; lost_reason: string; notes: string; lead_score: string }>
+    Record<string, { status: string; revenue: string; cost_of_goods: string; last_touch_source: string; product_interest: string; intent: string; project_size: string; project_location: string; estimated_value: string; next_follow_up_at: string; follow_up_reason: string; pending_reason: string; no_response_reason: string; lost_reason: string; notes: string; lead_score: string }>
   >({});
   const [loading, setLoading] = useState(true);
   const [savingId, setSavingId] = useState<string | null>(null);
@@ -265,7 +335,7 @@ export default function Dashboard() {
   const [audienceType, setAudienceType] = useState<
     "all" | "high_intent" | "closing"
   >("all");
-  const [quickFilter, setQuickFilter] = useState<"" | "hot" | "estimate" | "qualified" | "ask" | "builder" | "overdue">("");
+  const [quickFilter, setQuickFilter] = useState<"" | "hot" | "estimate" | "qualified" | "ask" | "builder" | "overdue" | "stale">("");
   const [expandedRows, setExpandedRows] = useState<Record<string, boolean>>({});
 
   const [since, setSince] = useState(dateInputLocal(sevenDaysAgo));
@@ -312,13 +382,14 @@ export default function Dashboard() {
 
       const nextDrafts: Record<
         string,
-        { status: string; revenue: string; last_touch_source: string; product_interest: string; intent: string; project_size: string; project_location: string; estimated_value: string; next_follow_up_at: string; follow_up_reason: string; pending_reason: string; no_response_reason: string; lost_reason: string; notes: string; lead_score: string }
+        { status: string; revenue: string; cost_of_goods: string; last_touch_source: string; product_interest: string; intent: string; project_size: string; project_location: string; estimated_value: string; next_follow_up_at: string; follow_up_reason: string; pending_reason: string; no_response_reason: string; lost_reason: string; notes: string; lead_score: string }
       > = {};
 
       for (const lead of json.leads) {
         nextDrafts[lead.id] = {
           status: lead.status,
           revenue: String(Number(lead.revenue || 0)),
+          cost_of_goods: String(Number(lead.cost_of_goods || 0)),
           last_touch_source: lead.last_touch_source || lead.source || "WhatsApp Organic",
           product_interest: lead.product_interest || "",
           intent: lead.intent || "",
@@ -507,6 +578,7 @@ export default function Dashboard() {
         body: JSON.stringify({
           status: draft.status,
           revenue: Number(draft.revenue || 0),
+          cost_of_goods: Number(draft.cost_of_goods || 0),
           last_touch_source: draft.last_touch_source,
           product_interest: draft.product_interest,
           intent: draft.intent,
@@ -556,6 +628,7 @@ export default function Dashboard() {
         [lead.id]: {
           status: json.lead.status,
           revenue: String(Number(json.lead.revenue || 0)),
+          cost_of_goods: String(Number(json.lead.cost_of_goods || 0)),
           last_touch_source:
             json.lead.last_touch_source || json.lead.source || "WhatsApp Organic",
           product_interest: json.lead.product_interest || "",
@@ -704,9 +777,16 @@ export default function Dashboard() {
       ["Survey Ditawarkan", "Survey Terjadwal"].includes(l.status)
     ).length;
     const closing = leads.filter((l) => l.status === "Closing").length;
-    const revenue = leads
-      .filter((l) => l.status === "Closing")
-      .reduce((sum, l) => sum + Number(l.revenue || 0), 0);
+    const closingLeads = leads.filter((l) => l.status === "Closing");
+    const revenue = closingLeads.reduce(
+      (sum, l) => sum + Number(l.revenue || 0),
+      0
+    );
+    const costOfGoods = closingLeads.reduce(
+      (sum, l) => sum + Number(l.cost_of_goods || 0),
+      0
+    );
+    const grossProfit = revenue - costOfGoods;
     const pipelineValue = leads
       .filter((l) => !["Closing", "Lost", "Tidak Layak"].includes(l.status))
       .reduce((sum, l) => sum + Number(l.estimated_value || 0), 0);
@@ -717,6 +797,9 @@ export default function Dashboard() {
       survey,
       closing,
       revenue,
+      costOfGoods,
+      grossProfit,
+      margin: revenue > 0 ? (grossProfit / revenue) * 100 : 0,
       pipelineValue,
       broadcastReactivation: leads.filter((l) => String(l.last_touch_source || "").includes("Broadcast")).length,
       touchTotals: {},
@@ -739,6 +822,7 @@ export default function Dashboard() {
       if (quickFilter === "ask") return lead.status === "Tanya Kebutuhan";
       if (quickFilter === "builder") return lead.status === "Chat Builder";
       if (quickFilter === "overdue") return Boolean(lead.next_follow_up_at && new Date(lead.next_follow_up_at).getTime() < nowMs && !["Closing", "Lost", "Tidak Layak"].includes(lead.status));
+      if (quickFilter === "stale") return stageAgeInfo(lead, nowMs).stale;
       return true;
     });
 
@@ -751,6 +835,7 @@ export default function Dashboard() {
       if (sortKey === "first_seen_at") return new Date(lead.first_seen_at).getTime();
       if (sortKey === "last_seen_at") return new Date(lead.last_seen_at).getTime();
       if (sortKey === "status") return statusRank(lead.status);
+      if (sortKey === "aging") return stageAgeInfo(lead, nowMs).ageMs;
       if (sortKey === "revenue") return Number(lead.revenue || 0);
       return "";
     };
@@ -853,6 +938,8 @@ export default function Dashboard() {
         <div className="headline-card"><div className="label">Pipeline Estimasi</div><div className="value">{rupiah(summary.pipelineValue || 0)}</div></div>
         <div className="headline-card"><div className="label">Closing</div><div className="value">{summary.closing}</div></div>
         <div className="headline-card"><div className="label">Revenue Closing</div><div className="value">{rupiah(summary.revenue)}</div></div>
+        <div className="headline-card"><div className="label">Gross Profit</div><div className="value">{rupiah(summary.grossProfit || 0)}</div></div>
+        <div className="headline-card"><div className="label">Margin Closing</div><div className="value">{pct(summary.margin || 0)}</div></div>
       </section>
       <div className="attribution-strip">
         <span><b>Meta</b> {summary.sourceTotals?.meta ?? 0}</span>
@@ -882,6 +969,7 @@ export default function Dashboard() {
                 <th>Hot</th>
                 <th>Closing</th>
                 <th>Revenue</th>
+                <th>Gross Profit</th>
               </tr>
             </thead>
             <tbody>
@@ -898,11 +986,12 @@ export default function Dashboard() {
                   <td>{sourceStageCount(row.statuses, "Hot")}</td>
                   <td>{row.closing}</td>
                   <td>{rupiah(row.revenue)}</td>
+                  <td>{rupiah(row.grossProfit || 0)}</td>
                 </tr>
               ))}
               {(summary.sources ?? []).length === 0 && (
                 <tr>
-                  <td colSpan={11} style={{ textAlign: "center", color: "#667085", padding: 24 }}>
+                  <td colSpan={12} style={{ textAlign: "center", color: "#667085", padding: 24 }}>
                     Belum ada lead pada periode ini.
                   </td>
                 </tr>
@@ -1077,8 +1166,11 @@ export default function Dashboard() {
             ["Survey", compactNumber(performance?.summary?.survey ?? 0)],
             ["Closing Cohort", compactNumber(performance?.summary?.closing ?? 0)],
             ["Revenue Cohort", rupiah(performance?.summary?.revenue ?? 0)],
+            ["Gross Profit Cohort", rupiah(performance?.summary?.gross_profit ?? 0)],
+            ["Profit ROAS", roas(performance?.summary?.profit_roas ?? 0)],
             ["Closing Aktual", compactNumber(performance?.closing_activity?.closing ?? 0)],
             ["Revenue Aktual", rupiah(performance?.closing_activity?.revenue ?? 0)],
+            ["Profit Aktual", rupiah(performance?.closing_activity?.gross_profit ?? 0)],
             ["ROAS Cohort", roas(performance?.summary?.roas ?? 0)]
           ].map(([label, value]) => (
             <div
@@ -1108,7 +1200,8 @@ export default function Dashboard() {
         >
           <strong>Catatan atribusi:</strong> Revenue Cohort mengikuti tanggal pertama lead Meta Ads masuk CRM.
           {" "}Closing Meta Ads yang benar-benar terjadi pada periode ini: <strong>{performance?.closing_activity?.closing ?? 0}</strong>
-          {" "}dengan revenue <strong>{rupiah(performance?.closing_activity?.revenue ?? 0)}</strong>.
+          {" "}dengan revenue <strong>{rupiah(performance?.closing_activity?.revenue ?? 0)}</strong>
+          {" "}dan gross profit <strong>{rupiah(performance?.closing_activity?.gross_profit ?? 0)}</strong>.
         </div>
 
         <div
@@ -1138,8 +1231,11 @@ export default function Dashboard() {
           </button>
         </div>
 
+        <div className="sub" style={{ marginBottom: 8 }}>
+          <strong>Funnel Campaign / Ad:</strong> persentase kecil di bawah setiap tahap adalah conversion dari total Lead pada campaign/ad tersebut.
+        </div>
         <div className="table-wrap">
-          <table style={{ minWidth: 1400 }}>
+          <table style={{ minWidth: 1680 }}>
             <thead>
               <tr>
                 <th>{performanceGroup === "campaign" ? "Campaign" : "Ad"}</th>
@@ -1153,11 +1249,14 @@ export default function Dashboard() {
                 <th>Hot</th>
                 <th>Closing</th>
                 <th>Revenue</th>
+                <th>Gross Profit</th>
+                <th>Margin</th>
                 <th>CPL</th>
                 <th>Cost/Qualified</th>
                 <th>Cost/Closing</th>
                 <th>Closing Rate</th>
                 <th>ROAS</th>
+                <th>Profit ROAS</th>
               </tr>
             </thead>
             <tbody>
@@ -1184,16 +1283,33 @@ export default function Dashboard() {
 
                     <td>{rupiah(row.metrics.spend)}</td>
                     <td>{row.metrics.leads}</td>
-                    <td>{row.metrics.estimate}</td>
+                    <td>
+                      {row.metrics.estimate}
+                      <div className="sub">{pct(funnelRate(row.metrics.estimate, row.metrics.leads))}</div>
+                    </td>
                     <td>
                       {row.metrics.qualified}
-                      <div className="sub">{pct(row.metrics.qualified_rate)}</div>
+                      <div className="sub">{pct(funnelRate(row.metrics.qualified, row.metrics.leads))}</div>
                     </td>
-                    <td>{row.metrics.survey}</td>
-                    <td>{row.metrics.quotation}</td>
-                    <td>{row.metrics.hot}</td>
-                    <td>{row.metrics.closing}</td>
+                    <td>
+                      {row.metrics.survey}
+                      <div className="sub">{pct(funnelRate(row.metrics.survey, row.metrics.leads))}</div>
+                    </td>
+                    <td>
+                      {row.metrics.quotation}
+                      <div className="sub">{pct(funnelRate(row.metrics.quotation, row.metrics.leads))}</div>
+                    </td>
+                    <td>
+                      {row.metrics.hot}
+                      <div className="sub">{pct(funnelRate(row.metrics.hot, row.metrics.leads))}</div>
+                    </td>
+                    <td>
+                      {row.metrics.closing}
+                      <div className="sub">{pct(row.metrics.closing_rate)}</div>
+                    </td>
                     <td>{rupiah(row.metrics.revenue)}</td>
+                    <td>{rupiah(row.metrics.gross_profit)}</td>
+                    <td>{pct(row.metrics.margin)}</td>
                     <td>{rupiah(row.metrics.cpl)}</td>
                     <td>{rupiah(row.metrics.cost_per_qualified)}</td>
                     <td>
@@ -1215,13 +1331,26 @@ export default function Dashboard() {
                     >
                       {roas(row.metrics.roas)}
                     </td>
+                    <td
+                      style={{
+                        fontWeight: 800,
+                        color:
+                          row.metrics.profit_roas > 1
+                            ? "#067647"
+                            : row.metrics.spend > 0
+                              ? "#b42318"
+                              : undefined
+                      }}
+                    >
+                      {roas(row.metrics.profit_roas)}
+                    </td>
                   </tr>
                 ))}
 
               {!performanceLoading && performanceRows.length === 0 && (
                 <tr>
                   <td
-                    colSpan={performanceGroup === "campaign" ? 15 : 16}
+                    colSpan={performanceGroup === "campaign" ? 18 : 19}
                     style={{ textAlign: "center", color: "#667085", padding: 30 }}
                   >
                     Belum ada data performa pada periode ini.
@@ -1232,7 +1361,7 @@ export default function Dashboard() {
               {performanceLoading && (
                 <tr>
                   <td
-                    colSpan={performanceGroup === "campaign" ? 15 : 16}
+                    colSpan={performanceGroup === "campaign" ? 18 : 19}
                     style={{ textAlign: "center", color: "#667085", padding: 30 }}
                   >
                     Memuat performa Meta Ads…
@@ -1257,6 +1386,7 @@ export default function Dashboard() {
             <button className={`action-card-button ${quickFilter === "ask" ? "active" : ""}`} onClick={() => setQuickFilter(quickFilter === "ask" ? "" : "ask")}><b>{leads.filter(l => l.status === "Tanya Kebutuhan").length}</b><span>Tanya Aja</span></button>
             <button className={`action-card-button ${quickFilter === "builder" ? "active" : ""}`} onClick={() => setQuickFilter(quickFilter === "builder" ? "" : "builder")}><b>{leads.filter(l => l.status === "Chat Builder").length}</b><span>Builder</span></button>
             <button className={`action-card-button ${quickFilter === "overdue" ? "active" : ""}`} onClick={() => setQuickFilter(quickFilter === "overdue" ? "" : "overdue")}><b>{leads.filter(l => l.next_follow_up_at && new Date(l.next_follow_up_at).getTime() < nowMs && !["Closing","Lost","Tidak Layak"].includes(l.status)).length}</b><span>Overdue</span></button>
+            <button className={`action-card-button ${quickFilter === "stale" ? "active" : ""}`} onClick={() => setQuickFilter(quickFilter === "stale" ? "" : "stale")}><b>{leads.filter(l => stageAgeInfo(l, nowMs).stale).length}</b><span>Stale/Aging</span></button>
           </div>
         </div>
       </section>
@@ -1374,7 +1504,7 @@ export default function Dashboard() {
       </section>
 
       <section className="panel lead-panel">
-        {quickFilter && <div className="quick-filter-banner">Filter cepat aktif: <strong>{{hot:"Hot",estimate:"Estimasi",qualified:"Qualified",ask:"Tanya Aja",builder:"Builder",overdue:"Overdue"}[quickFilter]}</strong><button onClick={() => setQuickFilter("")}>Tampilkan semua</button></div>}
+        {quickFilter && <div className="quick-filter-banner">Filter cepat aktif: <strong>{{hot:"Hot",estimate:"Estimasi",qualified:"Qualified",ask:"Tanya Aja",builder:"Builder",overdue:"Overdue",stale:"Stale/Aging"}[quickFilter]}</strong><button onClick={() => setQuickFilter("")}>Tampilkan semua</button></div>}
         <div className="table-wrap lead-table-wrap">
           <table className="lead-table">
             <thead>
@@ -1383,6 +1513,7 @@ export default function Dashboard() {
                 <th><button className="sort-button" onClick={() => toggleSort("first_seen_at")}>{sortLabel("Masuk", "first_seen_at")}</button></th>
                 <th><button className="sort-button" onClick={() => toggleSort("last_seen_at")}>{sortLabel("Aktivitas", "last_seen_at")}</button></th>
                 <th><button className="sort-button" onClick={() => toggleSort("status")}>{sortLabel("Status", "status")}</button></th>
+                <th><button className="sort-button" onClick={() => toggleSort("aging")}>{sortLabel("Aging", "aging")}</button></th>
                 <th>Score</th>
                 <th>Next Action</th>
                 <th>Next FU</th>
@@ -1394,7 +1525,7 @@ export default function Dashboard() {
             <tbody>
               {!loading && sortedLeads.map((lead) => {
                 const draft = drafts[lead.id] ?? {
-                  status: lead.status, revenue: String(Number(lead.revenue || 0)), last_touch_source: lead.last_touch_source || lead.source || "WhatsApp Organic",
+                  status: lead.status, revenue: String(Number(lead.revenue || 0)), cost_of_goods: String(Number(lead.cost_of_goods || 0)), last_touch_source: lead.last_touch_source || lead.source || "WhatsApp Organic",
                   product_interest: lead.product_interest || "", intent: lead.intent || "", project_size: lead.project_size || "", project_location: lead.project_location || "",
                   estimated_value: String(Number(lead.estimated_value || 0)), next_follow_up_at: lead.next_follow_up_at ? new Date(lead.next_follow_up_at).toISOString().slice(0,16) : "", follow_up_reason: lead.follow_up_reason || "",
                   pending_reason: lead.pending_reason || "", no_response_reason: lead.no_response_reason || "", lost_reason: lead.lost_reason || "", notes: lead.notes || "", lead_score: String(Number(lead.lead_score || 0))
@@ -1417,6 +1548,27 @@ export default function Dashboard() {
                           {STATUSES.map((x) => <option key={x} value={x}>{statusLabel(x)}</option>)}
                         </select>
                       </td>
+                      <td>
+                        {(() => {
+                          const aging = stageAgeInfo(lead, nowMs);
+                          return (
+                            <span
+                              title={`Lama berada di status ${statusLabel(lead.status)}`}
+                              style={{
+                                fontWeight: aging.stale ? 800 : 600,
+                                color: aging.critical
+                                  ? "#b42318"
+                                  : aging.stale
+                                    ? "#b54708"
+                                    : "#475467",
+                                whiteSpace: "nowrap"
+                              }}
+                            >
+                              {aging.text}
+                            </span>
+                          );
+                        })()}
+                      </td>
                       <td><span className={`score-badge score-${score >= 85 ? "hot" : score >= 55 ? "warm" : "low"}`}>{score}</span></td>
                       <td><div className={`next-action compact-next status-${draft.status.replace(/\s+/g,"-").toLowerCase()}`}><strong>Next:</strong> {suggestedNextAction(draft.status)}</div></td>
                       <td><button className={followUp.overdue ? "followup-chip overdue-chip" : "followup-chip"} onClick={() => openLeadDetail(lead.id)}>{followUp.text}</button></td>
@@ -1425,7 +1577,7 @@ export default function Dashboard() {
                       <td><div className="row-actions"><button className="detail-button" onClick={() => toggleLeadDetail(lead.id)}>{expanded ? "Tutup" : "Detail Sales"}</button><button className="save" disabled={savingId === lead.id} onClick={() => saveLead(lead)}>{savingId === lead.id ? "Simpan…" : "Simpan"}</button></div></td>
                     </tr>
                     {expanded && (
-                      <tr className="detail-row"><td colSpan={10}>
+                      <tr className="detail-row"><td colSpan={11}>
                         <div className="sales-detail-grid">
                           <div className="detail-block">
                             <div className="detail-title">Konteks Lead</div>
@@ -1444,6 +1596,36 @@ export default function Dashboard() {
                               <input className="mini-control" inputMode="numeric" placeholder="Nilai estimasi (Rp)" value={draft.estimated_value} onChange={(e) => setDrafts((d) => ({...d,[lead.id]: {...draft,estimated_value:e.target.value.replace(/[^\d]/g,"")}}))}/>
                             </div>
                           </div>
+                          <div className="detail-block">
+                            <div className="detail-title">Profit & Margin</div>
+                            <div className="sales-grid">
+                              <input
+                                className="mini-control"
+                                inputMode="numeric"
+                                placeholder="Revenue Closing (Rp)"
+                                value={draft.revenue}
+                                onChange={(e) => setDrafts((d) => ({...d,[lead.id]: {...draft,revenue:e.target.value.replace(/[^\d]/g,"")}}))}
+                              />
+                              <input
+                                className="mini-control"
+                                inputMode="numeric"
+                                placeholder="Modal / COGS (Rp)"
+                                value={draft.cost_of_goods}
+                                onChange={(e) => setDrafts((d) => ({...d,[lead.id]: {...draft,cost_of_goods:e.target.value.replace(/[^\d]/g,"")}}))}
+                              />
+                              <div className="auto-score-box">
+                                <span>Gross Profit</span>
+                                <strong>{rupiah(Number(draft.revenue || 0) - Number(draft.cost_of_goods || 0))}</strong>
+                                <small>Revenue − Modal</small>
+                              </div>
+                              <div className="auto-score-box">
+                                <span>Margin</span>
+                                <strong>{pct(Number(draft.revenue || 0) > 0 ? ((Number(draft.revenue || 0) - Number(draft.cost_of_goods || 0)) / Number(draft.revenue || 0)) * 100 : 0)}</strong>
+                                <small>Gross Profit ÷ Revenue</small>
+                              </div>
+                            </div>
+                          </div>
+
                           <div className="detail-block">
                             <div className="detail-title">Follow Up</div>
                             <div className="sales-grid">
