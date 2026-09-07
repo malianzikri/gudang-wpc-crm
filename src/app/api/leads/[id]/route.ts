@@ -152,6 +152,8 @@ export async function PATCH(
       );
     }
 
+    const saveStartedAt = new Date().toISOString();
+
     const { data: updated, error: updateError } = await db
       .from("leads")
       .update(patch)
@@ -187,19 +189,39 @@ export async function PATCH(
     }
 
     if (patch.status !== undefined && patch.status !== existing.status) {
-      const { error: eventError } = await db
+      // Newer database versions have a trigger that logs status changes.
+      // Older databases may not. Check first, then only insert manually
+      // when the trigger did not already create the event.
+      const { data: existingEvent, error: eventLookupError } = await db
         .from("lead_status_events")
-        .insert({
-          lead_id: id,
-          old_status: existing.status,
-          new_status: patch.status,
-          revenue: updated.revenue ?? 0
-        });
+        .select("id")
+        .eq("lead_id", id)
+        .eq("old_status", existing.status)
+        .eq("new_status", patch.status)
+        .gte("created_at", saveStartedAt)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
 
-      // The CRM update has already succeeded; audit logging must not make
-      // the user think the lead itself failed to save.
-      if (eventError) {
-        console.error("lead_status_events insert failed:", eventError);
+      if (eventLookupError) {
+        console.error("lead_status_events lookup failed:", eventLookupError);
+      }
+
+      if (!existingEvent) {
+        const { error: eventError } = await db
+          .from("lead_status_events")
+          .insert({
+            lead_id: id,
+            old_status: existing.status,
+            new_status: patch.status,
+            revenue: updated.revenue ?? 0
+          });
+
+        // The CRM update has already succeeded; audit logging must not make
+        // the user think the lead itself failed to save.
+        if (eventError) {
+          console.error("lead_status_events insert failed:", eventError);
+        }
       }
     }
 

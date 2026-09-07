@@ -312,7 +312,7 @@ export default function Dashboard() {
 
       const nextDrafts: Record<
         string,
-        { status: string; revenue: string; last_touch_source: string; product_interest: string; intent: string; project_size: string; project_location: string; estimated_value: string; next_follow_up_at: string; follow_up_reason: string; lead_score: string }
+        { status: string; revenue: string; last_touch_source: string; product_interest: string; intent: string; project_size: string; project_location: string; estimated_value: string; next_follow_up_at: string; follow_up_reason: string; pending_reason: string; no_response_reason: string; lost_reason: string; notes: string; lead_score: string }
       > = {};
 
       for (const lead of json.leads) {
