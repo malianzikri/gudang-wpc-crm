@@ -11,6 +11,23 @@ import {
 
 export const runtime = "nodejs";
 
+function isMissingTable(error: any) {
+  const code = String(error?.code || "");
+  const message = String(error?.message || "").toLowerCase();
+
+  return (
+    code === "42P01" ||
+    code === "PGRST205" ||
+    message.includes("could not find the table") ||
+    message.includes("does not exist")
+  );
+}
+
+function legacyAudienceKey(value: string | null | undefined) {
+  if (value === "high_intent") return "qualified_plus";
+  return value;
+}
+
 function csvCell(value: unknown) {
   const str = String(value ?? "");
   return `"${str.replace(/"/g, '""')}"`;
@@ -24,7 +41,9 @@ export async function POST(request: Request) {
   try {
     const db = supabaseAdmin();
     const body = await request.json().catch(() => ({}));
-    const audienceKey = validAudienceKey(body?.type);
+    const audienceKey = validAudienceKey(
+      legacyAudienceKey(body?.type)
+    );
     const mode = validExportMode(body?.mode);
 
     const { data: leads, error: leadError } = await db
@@ -34,15 +53,37 @@ export async function POST(request: Request) {
       .limit(10000);
     if (leadError) throw leadError;
 
-    const { data: memberRows, error: memberError } = await db
+    const memberResult = await db
       .from("meta_audience_members")
       .select("lead_id")
       .eq("audience_key", audienceKey)
       .limit(10000);
-    if (memberError) throw memberError;
 
+    if (
+      memberResult.error &&
+      !isMissingTable(memberResult.error)
+    ) {
+      throw memberResult.error;
+    }
+
+    // FULL export can still work even when the optional tracking
+    // migration has not been installed yet.
+    if (
+      memberResult.error &&
+      mode !== "full"
+    ) {
+      throw new Error(
+        "Tracking Custom Audience belum siap. Jalankan migration audience V4 atau gunakan FULL export."
+      );
+    }
+
+    const memberRows = memberResult.data ?? [];
     const leadRows: any[] = (leads ?? []) as any[];
-    const syncedIds = new Set<string>(((memberRows ?? []) as any[]).map((row: any) => String(row.lead_id)));
+    const syncedIds = new Set<string>(
+      (memberRows as any[]).map(
+        (row: any) => String(row.lead_id)
+      )
+    );
     const currentEligible = leadRows.filter((lead: any) => isAudienceEligible(lead, audienceKey));
     const eligibleIds = new Set<string>(currentEligible.map((lead: any) => String(lead.id)));
 
@@ -74,12 +115,14 @@ export async function POST(request: Request) {
     }
 
     const header = ["phone", "fn", "ln", "country", "external_id"];
-    const csv = [
-      header.map(csvCell).join(","),
-      ...rows.map((row) => row.map(csvCell).join(","))
-    ].join("\r\n");
+    const csv =
+      "\uFEFF" +
+      [
+        header.map(csvCell).join(","),
+        ...rows.map((row) => row.map(csvCell).join(","))
+      ].join("\r\n");
 
-    const { data: exportLog, error: exportError } = await db
+    const exportResult = await db
       .from("meta_audience_exports")
       .insert({
         audience_key: audienceKey,
@@ -89,7 +132,15 @@ export async function POST(request: Request) {
       })
       .select("id")
       .single();
-    if (exportError) throw exportError;
+
+    if (
+      exportResult.error &&
+      !isMissingTable(exportResult.error)
+    ) {
+      throw exportResult.error;
+    }
+
+    const exportLog = exportResult.data ?? null;
 
     const date = new Intl.DateTimeFormat("en-CA", {
       timeZone: "Asia/Jakarta",
@@ -106,7 +157,11 @@ export async function POST(request: Request) {
         "Content-Type": "text/csv; charset=utf-8",
         "Content-Disposition": `attachment; filename="${filename}"`,
         "Cache-Control": "no-store",
-        "X-Audience-Export-Id": String(exportLog.id),
+        ...(exportLog?.id
+          ? {
+              "X-Audience-Export-Id": String(exportLog.id)
+            }
+          : {}),
         "X-Audience-Export-Count": String(rows.length),
         "X-Audience-Export-Filename": filename
       }

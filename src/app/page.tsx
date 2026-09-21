@@ -744,16 +744,74 @@ export default function Dashboard() {
   }
 
 
-  function exportCustomAudience() {
-    const params = new URLSearchParams({
-      since,
-      until,
-      type: audienceType
-    });
+  async function exportCustomAudience() {
+    setError("");
+    setNotice("");
 
-    // Export uses current dashboard date range.
-    // This endpoint only reads Supabase and does not call Meta.
-    window.location.href = `/api/leads/export?${params.toString()}`;
+    try {
+      const typeMap = {
+        all: "all",
+        high_intent: "qualified_plus",
+        closing: "closing"
+      } as const;
+
+      const res = await fetch("/api/leads/export", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          type: typeMap[audienceType],
+          mode: "full"
+        })
+      });
+
+      if (!res.ok) {
+        let message = "Gagal membuat CSV Custom Audience.";
+
+        try {
+          const json = await res.json();
+          message = json?.error || message;
+        } catch {
+          // Response may not be JSON.
+        }
+
+        throw new Error(message);
+      }
+
+      const blob = await res.blob();
+      const contentDisposition =
+        res.headers.get("content-disposition") || "";
+
+      const filenameMatch =
+        contentDisposition.match(/filename="([^"]+)"/i);
+
+      const filename =
+        filenameMatch?.[1] ||
+        `META_CA_${audienceType.toUpperCase()}.csv`;
+
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+
+      anchor.href = url;
+      anchor.download = filename;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+
+      window.setTimeout(() => {
+        URL.revokeObjectURL(url);
+      }, 1000);
+
+      setNotice(
+        `CSV ${filename} berhasil dibuat. File bisa langsung dibuka di Excel.`
+      );
+    } catch (e: any) {
+      setError(
+        e?.message ||
+          "Gagal export CSV Custom Audience."
+      );
+    }
   }
 
   const canSyncPerformance =
@@ -1477,7 +1535,7 @@ export default function Dashboard() {
         <div style={{ minWidth: 240, flex: "1 1 280px" }}>
           <div className="label">Export Custom Audience Meta</div>
           <div className="sub">
-            Mengikuti periode {since} s.d. {until}, tetapi export audience tetap berdasarkan tanggal Lead Masuk agar follow-up lead lama tidak ikut ter-export ulang. Tidak memanggil API Meta.
+            Export berdasarkan kondisi/status CRM saat ini. Filter tanggal dashboard tidak mengubah isi audience. Tidak memanggil API Meta.
           </div>
         </div>
 
