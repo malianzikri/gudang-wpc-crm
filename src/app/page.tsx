@@ -152,7 +152,8 @@ type SortKey =
   | "last_seen_at"
   | "status"
   | "aging"
-  | "revenue";
+  | "revenue"
+  | "gross_profit";
 
 function rupiah(value: number) {
   return new Intl.NumberFormat("id-ID", {
@@ -895,6 +896,15 @@ export default function Dashboard() {
       if (sortKey === "status") return statusRank(lead.status);
       if (sortKey === "aging") return stageAgeInfo(lead, nowMs).ageMs;
       if (sortKey === "revenue") return Number(lead.revenue || 0);
+      if (sortKey === "gross_profit") {
+        const revenue = Number(lead.revenue || 0);
+        const cogs = Number(lead.cost_of_goods || 0);
+
+        // Closing tanpa COGS ditandai sebagai data belum lengkap.
+        if (lead.status === "Closing" && cogs <= 0) return -1;
+
+        return revenue - cogs;
+      }
       return "";
     };
 
@@ -1576,6 +1586,7 @@ export default function Dashboard() {
                 <th>Next Action</th>
                 <th>Next FU</th>
                 <th><button className="sort-button" onClick={() => toggleSort("revenue")}>{sortLabel("Revenue", "revenue")}</button></th>
+                <th><button className="sort-button" onClick={() => toggleSort("gross_profit")}>{sortLabel("Gross Profit", "gross_profit")}</button></th>
                 <th>CAPI</th>
                 <th>Aksi</th>
               </tr>
@@ -1631,11 +1642,62 @@ export default function Dashboard() {
                       <td><div className={`next-action compact-next status-${draft.status.replace(/\s+/g,"-").toLowerCase()}`}><strong>Next:</strong> {suggestedNextAction(draft.status)}</div></td>
                       <td><button className={followUp.overdue ? "followup-chip overdue-chip" : "followup-chip"} onClick={() => openLeadDetail(lead.id)}>{followUp.text}</button></td>
                       <td><input className="revenue compact-revenue" inputMode="numeric" value={draft.revenue} onChange={(e) => setDrafts((d) => ({...d,[lead.id]: {...draft,revenue:e.target.value.replace(/[^\d]/g,"")}}))}/></td>
+                      <td style={{ minWidth: 140 }}>
+                        {draft.status !== "Closing" ? (
+                          <span className="sub">—</span>
+                        ) : Number(draft.cost_of_goods || 0) <= 0 ? (
+                          <span
+                            title="Buka Detail Sales lalu isi Modal / COGS agar Gross Profit dapat dihitung"
+                            style={{
+                              display: "inline-block",
+                              padding: "4px 7px",
+                              borderRadius: 999,
+                              background: "#fff4e5",
+                              color: "#b54708",
+                              fontWeight: 700,
+                              whiteSpace: "nowrap",
+                              fontSize: 12
+                            }}
+                          >
+                            Belum isi modal
+                          </span>
+                        ) : (
+                          <div>
+                            <strong
+                              style={{
+                                color:
+                                  Number(draft.revenue || 0) -
+                                    Number(draft.cost_of_goods || 0) <
+                                  0
+                                    ? "#b42318"
+                                    : "#067647",
+                                whiteSpace: "nowrap"
+                              }}
+                            >
+                              {rupiah(
+                                Number(draft.revenue || 0) -
+                                  Number(draft.cost_of_goods || 0)
+                              )}
+                            </strong>
+                            <div className="sub" style={{ whiteSpace: "nowrap" }}>
+                              Margin{" "}
+                              {pct(
+                                Number(draft.revenue || 0) > 0
+                                  ? ((Number(draft.revenue || 0) -
+                                      Number(draft.cost_of_goods || 0)) /
+                                      Number(draft.revenue || 0)) *
+                                      100
+                                  : 0
+                              )}
+                            </div>
+                          </div>
+                        )}
+                      </td>
                       <td><div className={lead.capi_purchase_sent_at || lead.capi_lead_sent_at ? "source-meta capi-small" : "capi-small"}>{capiLabel(lead)}</div></td>
                       <td><div className="row-actions"><button className="detail-button" onClick={() => toggleLeadDetail(lead.id)}>{expanded ? "Tutup" : "Detail Sales"}</button><button className="save" disabled={savingId === lead.id} onClick={() => saveLead(lead)}>{savingId === lead.id ? "Simpan…" : "Simpan"}</button></div></td>
                     </tr>
                     {expanded && (
-                      <tr className="detail-row"><td colSpan={11}>
+                      <tr className="detail-row"><td colSpan={12}>
                         <div className="sales-detail-grid">
                           <div className="detail-block">
                             <div className="detail-title">Konteks Lead</div>
